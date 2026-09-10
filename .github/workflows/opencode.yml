@@ -19,11 +19,18 @@ jobs:
       contains(github.event.comment.body, ' /opencode') ||
       startsWith(github.event.comment.body, '/opencode'))
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: write
       pull-requests: write
       issues: write
+    env:
+      # Headless CI cannot answer opencode's interactive permission prompt. The
+      # default for external_directory is "ask", which hangs the run until
+      # GitHub's 6h cap; allow it so the agent can touch paths just outside the
+      # checkout (e.g. `..`). bash/edit/read are already allow-by-default here.
+      OPENCODE_CONFIG_CONTENT: '{"$schema":"https://opencode.ai/config.json","permission":{"external_directory":"allow"}}'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -52,11 +59,16 @@ jobs:
   sync-upstream:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       id-token: write
       contents: write
       pull-requests: write
       issues: write
+    env:
+      # Same as the comment job: allow external_directory so the headless agent
+      # never blocks on an unanswerable permission prompt (the 6h-hang culprit).
+      OPENCODE_CONFIG_CONTENT: '{"$schema":"https://opencode.ai/config.json","permission":{"external_directory":"allow"}}'
     steps:
       - name: Checkout repository（完整历史）
         uses: actions/checkout@v6
@@ -92,23 +104,38 @@ jobs:
           prompt: |
             任务：把 upstream/master（deepseek-ai/deepseek-harness）合并进本仓库 master，并做严谨
             的冲突检验与手机版适配。本仓库是上游的 fork，自有改动全部隔离在 dsh-mobile/ 目录
-            （Android App）和根 README.md（手机版文档）。当前 upstream/master 领先
-            ${{ steps.check.outputs.behind }} 个提交。
+            （Android App）、根 README.md（手机版文档）和 .github/workflows/（本仓库自有 CI）。
+            当前 upstream/master 领先 ${{ steps.check.outputs.behind }} 个提交。
 
             严格执行以下流程：
 
             1. 合并前先用 `git log --oneline master..upstream/master | head -40` 与
                `git diff --stat master...upstream/master` 看清这批提交改了什么。
 
-            2. 执行 `git merge upstream/master`：
-               - 若零冲突：直接进入第 3 步。
-               - 若有冲突，只允许出现在 README.md：该文件是本仓库整篇替换的手机版文档，
-                 一律用 `git checkout --ours README.md && git add README.md` 保留我方版本。
-               - 冲突出现在任何其它路径（尤其是 dsh-mobile/ 之外的源码）：不得擅自取舍，
-                 立即 `git merge --abort`，在本 issue/新建 issue 里报告冲突文件清单与原因后停止，
-                 绝不强行提交。
+            2. 打好还原点后执行合并：
+               - 先执行 `git tag -f pre-sync HEAD`（记住合并前的 master）。
+               - 再执行 `git merge upstream/master`：
+                 - 若零冲突：直接进入第 3 步。
+                 - 若有冲突，只允许出现在 README.md：该文件是本仓库整篇替换的手机版文档，
+                   一律用 `git checkout --ours README.md && git add README.md` 保留我方版本。
+                 - 冲突出现在任何其它路径（尤其是 dsh-mobile/ 之外的源码）：不得擅自取舍，
+                   立即 `git merge --abort`，在本 issue/新建 issue 里报告冲突文件清单与原因后停止，
+                   绝不强行提交。
 
-            3. 合并后适配检查（必须逐条验证，不得跳过）：
+            3. 保留本仓库 CI 配置（关键，否则 push 必被 GitHub 拒绝）：
+               本仓库的 GITHUB_TOKEN 只有 contents:write，没有 `workflows` 权限。只要合并提交
+               改动了 `.github/workflows/` 下任何文件，push 就会被拒绝：
+                 refusing to allow a GitHub App to create or update workflow ... without `workflows` permission
+               而 upstream 一直在改 workflow，所以合并后必须把整个 workflow 目录还原为本仓库
+               合并前的版本（即第 2 步打的 pre-sync 标签）。在合并完成后、其它改动之前执行：
+                 git rm -r --cached .github/workflows || true
+                 git checkout pre-sync -- .github/workflows
+                 git clean -fd .github/workflows
+                 git add -A .github/workflows
+                 git tag -d pre-sync
+               这一步只丢弃上游对 .github/workflows/ 的改动，不影响任何源码或其它的合并结果。
+
+            4. 合并后适配检查（必须逐条验证，不得跳过）：
                - 若 upstream 改动涉及 packages/client/web*、dsh-web-frontend、ui-attachment 等
                  Web UI 相关包：核对 dsh-mobile/app/src/main/assets/mobile.css 与 inject.js
                  里 `[class*="_xxx"]` 选择器在新 DOM 中是否仍命中（类名是构建哈希前缀，
@@ -117,11 +144,11 @@ jobs:
                  BootstrapInstaller/NodePtyFixer 逻辑是否仍成立。
                - dsh-mobile/ 目录内的任何文件被合并改动时必须人工级别的复核说明原因。
 
-            4. 验证：
+            5. 验证：
                - 在 `dsh-mobile` 目录执行 `./gradlew :app:assembleRelease`（x86_64 runner
                  不需要 aapt2 覆盖参数；JDK 17 用 runner 自带）。构建失败先修再提交。
 
-            5. 提交与推送：
+            6. 提交与推送：
                - 全部通过后才允许提交：commit message 写明 "Merge upstream/master（含
                  <版本或要点>）"，push 到 origin master。
                - 有任何一步验证不通过：不提交不推送，把证据（日志/ diff）写到评论里停止。
