@@ -49,7 +49,8 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: opencode-go/deepseek-v4-flash
+          # opencode-go 的 deepseek-flash 即 DeepSeek V4.1 Flash
+          model: opencode-go/deepseek-flash
           # opencode bot（App 换票）在 2026-07-15 后创建的仓库上因上游 OIDC sub
           # 格式变更而必挂（anomalyco/opencode#37823），官方建议的 workaround
           # 就是 use_github_token；上游修复后可移除此行恢复 bot 身份
@@ -99,7 +100,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: opencode-go/deepseek-v4-flash
+          model: opencode-go/deepseek-flash
           use_github_token: 'true'
           prompt: |
             任务：把 upstream/master（deepseek-ai/deepseek-harness）合并进本仓库 master，并做严谨
