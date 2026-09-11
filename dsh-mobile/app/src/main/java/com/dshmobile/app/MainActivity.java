@@ -446,32 +446,14 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            // 服务已在应答后，等 HarnessService 从 dsh web stdout 抓到带 token
-            // 的认证 URL。首次启动要装配整棵插件树，可能明显超过 5s；给足 60s，
-            // 期间持续刷新启动屏。抓不到再退回干净 URL（旧 cookie 可能仍有效），
-            // 由 onPageFinished 的 401 兜底再补一次。
-            String auth = null;
-            long urlDeadline = System.currentTimeMillis() + 60_000;
-            while (auth == null && !stopPolling
-                    && System.currentTimeMillis() < urlDeadline) {
-                auth = authenticatedUrl();
-                if (auth == null) {
-                    final long left = (urlDeadline - System.currentTimeMillis()) / 1000;
-                    handler.post(() -> splashStatus.setText("正在等待认证链接… (" + left + "s)"));
-                    try {
-                        Thread.sleep(250);
-                    } catch (InterruptedException e) {
-                        break;
-                    }
-                }
-            }
-            final String authUrl = auth;
             final boolean ok = up;
             handler.post(() -> {
                 if (isFinishing()) return;
                 if (ok) {
                     splashStatus.setText("正在加载界面…");
-                    loadMainUrl(authUrl);
+                    // 认证 cookie 由 CookieMinter 直接从容器内持久签名密钥自签，
+                    // 不依赖抓取 dsh web 的 stdout；loadMainUrl 内部会等密钥就绪。
+                    loadMainUrl(authenticatedUrl());
                 } else {
                     splashStatus.setText("等待超时。请到设置查看日志，或点“重新安装”。");
                 }
@@ -495,32 +477,47 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    /**
+     * 加载 dsh Web 根路径，先确保带上一枚有效会话 cookie：
+     *   1. 首选 {@link CookieMinter}：直接读容器内持久签名密钥自签 cookie；
+     *   2. 拿不到密钥时回退 token 交换（若 HarnessService 抓到了认证 URL）；
+     *   3. 都失败才裸加载根路径（旧 cookie 可能仍有效）。
+     * 任务在后台线程完成，绝不阻塞主线程。
+     */
     private void loadMainUrl(String authUrl) {
         loadAttempts++;
         final String root = "http://127.0.0.1:" + port + "/";
-        if (authUrl == null) {
-            webView.loadUrl(root);
-            return;
-        }
-        // 先在后台用本机 HTTP 自己完成 token 交换，把服务端下发的 Set-Cookie
-        // 直接塞进 WebView 的 CookieManager，再加载干净根路径。这样不依赖
-        // WebView 对 303 跳转+跨响应种 cookie 的实现差异，鉴权确定成功。
-        final String url = authUrl;
         new Thread(() -> {
-            final String cookie = exchangeTokenForCookie(url);
+            // 服务刚应答时密钥可能还没落盘：宽限重试，避免又一次 401
+            String cookie = null;
+            long deadline = System.currentTimeMillis() + 15_000;
+            while (cookie == null && !stopPolling && System.currentTimeMillis() < deadline) {
+                cookie = CookieMinter.mint(MainActivity.this, port);
+                if (cookie == null && authUrl != null) {
+                    cookie = exchangeTokenForCookie(authUrl);
+                    break;
+                }
+                if (cookie == null) {
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            }
+            final String c = cookie;
             handler.post(() -> {
                 if (isFinishing()) return;
-                if (cookie != null) {
+                if (c != null) {
                     android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-                    cm.setCookie(root, cookie);
+                    cm.setCookie(root, c);
                     cm.flush();
                     webView.loadUrl(root);
                 } else {
-                    // 交换失败（token 过期等）：退回让 WebView 自己跟随 303
-                    webView.loadUrl(url);
+                    webView.loadUrl(authUrl != null ? authUrl : root);
                 }
             });
-        }, "dsh-token-exchange").start();
+        }, "dsh-cookie-load").start();
     }
 
     /**
@@ -565,26 +562,10 @@ public class MainActivity extends Activity {
                 return;
             }
             showSplash("连接 Web 服务失败，正在重试…");
-            // 重载前先在后台等认证 URL（最多 30s）：容器重启/首启慢时 token
-            // 可能还没打印，直接回退干净路径会再次撞上 401
-            new Thread(() -> {
-                String auth = null;
-                long deadline = System.currentTimeMillis() + 30_000;
-                while (auth == null && !stopPolling && System.currentTimeMillis() < deadline) {
-                    auth = authenticatedUrl();
-                    if (auth == null) {
-                        try {
-                            Thread.sleep(500);
-                        } catch (InterruptedException e) {
-                            break;
-                        }
-                    }
-                }
-                final String a = auth;
-                handler.postDelayed(() -> {
-                    if (!isFinishing()) loadMainUrl(a);
-                }, 1000);
-            }, "dsh-auth-wait").start();
+            // cookie 由 CookieMinter 自签（内部含密钥就绪重试），无需等 token
+            handler.postDelayed(() -> {
+                if (!isFinishing()) loadMainUrl(authenticatedUrl());
+            }, 1000);
         });
     }
 
