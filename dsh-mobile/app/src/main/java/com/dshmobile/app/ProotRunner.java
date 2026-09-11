@@ -177,6 +177,10 @@ public final class ProotRunner {
         inner.add("127.0.0.1");
         inner.add("--port");
         inner.add(String.valueOf(port));
+        // dsh 0.1.5 起浏览器入口带 token 鉴权：不传 --no-open 会尝试拉起宿主
+        // 默认浏览器（容器里必然失败，且日志多一行噪音）；带 token 的 URL 仍会
+        // 打印到日志，由 MainActivity 解析后交给 WebView 完成 cookie 交换。
+        inner.add("--no-open");
         return exec(ctx, inner, logFile);
     }
 

@@ -30,6 +30,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -431,12 +432,27 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
+            // 服务已在应答后，等 dsh 把带 token 的认证 URL 刷进日志（通常同一
+            // tick，宽限 5s）；轮询不到就退回干净 URL（旧 cookie 仍可能有效）。
+            String auth = null;
+            long urlDeadline = System.currentTimeMillis() + 5_000;
+            while (auth == null && System.currentTimeMillis() < urlDeadline) {
+                auth = authenticatedUrl();
+                if (auth == null) {
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            }
+            final String authUrl = auth;
             final boolean ok = up;
             handler.post(() -> {
                 if (isFinishing()) return;
                 if (ok) {
                     splashStatus.setText("正在加载界面…");
-                    loadMainUrl();
+                    loadMainUrl(authUrl);
                 } else {
                     splashStatus.setText("等待超时。请到设置查看日志，或点“重新安装”。");
                 }
@@ -444,9 +460,40 @@ public class MainActivity extends Activity {
         }, "dsh-port-poll").start();
     }
 
-    private void loadMainUrl() {
+    /**
+     * dsh 0.1.5 起 Web 入口带 token 鉴权：进程启动时打印
+     * `dsh web: http://127.0.0.1:<port>/?token=<随机值>`，根路径无 token/无
+     * 有效 cookie 直接 401。此方法从 dsh-web.log 取**最后一条**本端口、带
+     * token 的行，交给 WebView 首次加载；服务端校验后 303 到 `/` 并种下按
+     * host:port 绑定的签名 cookie，之后同源请求自动带上。
+     *
+     * @return 带 token 的完整 URL；日志里还没有时返回 {@code null}。
+     */
+    private String authenticatedUrl() {
+        File log = new File(ProotRunner.baseDir(this), "dsh-web.log");
+        if (!log.isFile()) return null;
+        String host = "127.0.0.1:" + port;
+        String best = null;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new java.io.FileInputStream(log), "UTF-8"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                int at = line.indexOf("dsh web: http");
+                if (at < 0) continue;
+                String s = line.substring(at + "dsh web: ".length()).trim();
+                int sp = s.indexOf(' ');
+                if (sp >= 0) s = s.substring(0, sp);
+                if (s.contains(host) && s.contains("token=")) best = s;
+            }
+        } catch (Exception ignored) {
+            // 日志不可读：当作没有认证 URL，退回干净根路径
+        }
+        return best;
+    }
+
+    private void loadMainUrl(String authUrl) {
         loadAttempts++;
-        webView.loadUrl("http://127.0.0.1:" + port + "/");
+        webView.loadUrl(authUrl != null ? authUrl : "http://127.0.0.1:" + port + "/");
     }
 
     /** 主框架加载失败：恢复启动屏提示并有界自动重试（容器可能尚在预热或刚重启）。 */
@@ -459,7 +506,7 @@ public class MainActivity extends Activity {
             }
             showSplash("连接 Web 服务失败，正在重试…");
             handler.postDelayed(() -> {
-                if (!isFinishing()) loadMainUrl();
+                if (!isFinishing()) loadMainUrl(authenticatedUrl());
             }, 2000);
         });
     }

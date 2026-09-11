@@ -1,8 +1,8 @@
 /* ============================================================
    dsh-mobile 移动端适配样式（注入到 DeepSeek Harness Web UI）
    目标：390px 左右手机竖屏，触控友好，无横向溢出。
-   基于 dsh 0.1.0-rc.6 实际 DOM 结构编写：
-     框架  [class*="_frame"] = sidebarCol | centerCol | detailsCol
+   基于 dsh 0.1.5 实际 DOM 结构编写：
+     框架  [class*="_frame"] = sidebarCol | centerCol | rightbarCol
      导航  [class*="_rail"]（左侧图标栏）
      侧栏  [data-slot="sidebar"] / [class*="_listArea"]
      弹窗  [role="dialog"] / [class*="_dialog"]
@@ -170,13 +170,17 @@ div[class*="_trigger"] {
     max-width: calc(100vw - 16px);
   }
 
-  /* 右侧详情面板（轨迹/详情）：三态门控（JS 加类）。
+  /* 右侧详情面板（右栏/轨迹/详情）：三态门控（JS 加类）。
      有实质内容 → 全屏覆盖层；只有占位文案 → 整体隐藏，
-     否则它常驻 grid 列占掉大半宽度，消息流被挤成窄条 */
-  div[class*="_detailsCol"].dsh-mobile-empty {
+     否则它常驻 grid 列占掉大半宽度，消息流被挤成窄条。
+     dsh 0.1.5 把列从 _detailsCol 改名为 _rightbarCol，并给列元素加了稳定的
+     data-rightbar-col 属性（类名带构建哈希，属性更稳），两者都命中。 */
+  div[class*="_rightbarCol"].dsh-mobile-empty,
+  div[data-rightbar-col].dsh-mobile-empty {
     display: none !important;
   }
-  div[class*="_detailsCol"].dsh-mobile-open {
+  div[class*="_rightbarCol"].dsh-mobile-open,
+  div[data-rightbar-col].dsh-mobile-open {
     position: fixed !important;
     inset: 0 !important;
     z-index: 850;

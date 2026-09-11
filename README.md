@@ -16,10 +16,11 @@
 - **内置 Ubuntu 容器**：proot 运行完整 Ubuntu 22.04 (aarch64) rootfs，首启联网下载（约 200MB：rootfs + Node.js + dsh），默认全部走国内镜像（rootfs/Node/Termux/apt 用中科大源，npm 用 npmmirror）
 - **干净工作目录**：dsh 的 HOME 与 cwd 是容器内独立的 `/home/dsh`（不用 /root，避免安装残留与 npm 缓存污染工作区选择器）
 - **SD 卡目录映射**：外置 SD 卡 bind 到容器 `/mnt/sd` 和工作目录内 `/home/dsh/sd`；`/sdcard/dsh-shared` 兜底映射到 `/mnt/shared` 与 `/home/dsh/shared`，打开工作区即可看到 sd/ shared/ 两个入口，方便传入/传出文件
-- **手机版界面**：注入的 `mobile.css` 强制 dsh Web UI 适配手机屏幕比例（弹窗不溢出、详情面板按内容三态门控、轨迹事件详情面板整宽覆盖、触控目标加大、代码块横向滚动、设置弹窗单列化、消息页高度链锁死内部滚动、token/耗时统计条自动折行完整显示、悬浮提示气泡弹出 2.5 秒后自动消失）
+- **手机版界面**：注入的 `mobile.css` 强制 dsh Web UI 适配手机屏幕比例（弹窗不溢出、右栏/详情面板按内容三态门控——上游收起 `data-rightbar-collapsed` 时保持隐藏、轨迹事件详情面板整宽覆盖、触控目标加大、代码块横向滚动、设置弹窗单列化、消息页高度链锁死内部滚动、token/耗时统计条自动折行完整显示、悬浮提示气泡弹出 2.5 秒后自动消失）
 - **侧栏非常驻**：左侧 rail 默认隐藏，左上角悬浮按钮或屏幕左缘右滑呼出覆盖式抽屉，点遮罩、抽屉上左滑或选中会话自动收起
 - **DeepSeek 风格**：启动屏/安装向导/设置页均为 DeepSeek 品牌风格（品牌蓝 #4D6BFE、圆角卡片）
 - **前台服务保活**：容器由前台服务持有，通知栏可查看状态/停止
+- **浏览器 token 鉴权**：dsh 0.1.5 起 Web 入口带一次性 token（根路径无 token/无有效 cookie 直接 401）。手机版从 `dsh web` 日志解析带 token 的认证 URL 交给 WebView 首登，服务端校验后种下按 `host:port` 绑定的签名 cookie（30 天），后续请求自动复用；`dsh web` 以 `--no-open` 启动，避免容器内无效的浏览器拉起
 - **容器 SSH**：openssh-server 随服务自启（仅监听 127.0.0.1:8022），本机终端/Termux 直接 `ssh dsh@127.0.0.1 -p 8022`（普通用户 dsh，登录 PATH 带 node/npm；root 同密码也可登），电脑走 `adb forward`；密码首次自动生成，设置页可查看/复制/改端口
 - **命令沙箱已禁用**：容器启动时钉死 `DSH_PERMISSION_MODE=danger-full-access`（proot 里 bwrap/Landlock 基本不可用，workspace-write 会报 SANDBOX_UNAVAILABLE）；dsh 的 bash/文件写入不设围栏、不逐条询问。会话里仍可手动切回 workspace-write/read-only，但沙箱 runner 不可用时受限命令会失败
 

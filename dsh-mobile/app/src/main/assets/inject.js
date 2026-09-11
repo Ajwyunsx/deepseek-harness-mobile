@@ -42,22 +42,27 @@
     }
   }
 
-  // 详情面板（_detailsCol）三态门控：
+  // 详情面板三态门控：
   //  - 有实质内容 → .dsh-mobile-open，全屏覆盖层
   //  - 只有占位文案（"Click a tool row..."）→ .dsh-mobile-empty，整体隐藏。
   //    否则它会在 grid 里常驻占掉大半宽度，把消息流挤成窄条、文本逐词换行，
   //    卡片全被拉成一屏高——"看不到对话消息"的另一半根因。
+  // dsh 0.1.5 把列从 _detailsCol 改名为 _rightbarCol，并加了稳定的
+  // data-rightbar-col 属性；优先用属性，类名兜底，避免哈希改名再次失效。
   function updateDetailsCol() {
     var mobile = window.innerWidth <= 700;
-    var cols = document.querySelectorAll('div[class*="_detailsCol"]');
+    var cols = document.querySelectorAll('div[data-rightbar-col], div[class*="_rightbarCol"]');
     for (var i = 0; i < cols.length; i++) {
       var dc = cols[i];
       var text = (dc.innerText || '').trim();
       var placeholder = /click a tool row/i.test(text) || text.length < 30;
       var has = !placeholder && (text.length > 150 ||
         !!dc.querySelector('pre, code, table, img, video, canvas, textarea, [class*="_code"], [class*="_terminal"]'));
-      dc.classList.toggle('dsh-mobile-open', mobile && has);
-      dc.classList.toggle('dsh-mobile-empty', mobile && !has);
+      // 上游把右栏收进 0px 轨道时帧上带 data-rightbar-collapsed：此时列内可能
+      // 仍留着实质内容，不能据此弹全屏（会平白盖住对话）——交给上游保持隐藏。
+      var upstreamCollapsed = !!dc.closest('[data-rightbar-collapsed]');
+      dc.classList.toggle('dsh-mobile-open', mobile && has && !upstreamCollapsed);
+      dc.classList.toggle('dsh-mobile-empty', mobile && (!has || upstreamCollapsed));
     }
   }
 
