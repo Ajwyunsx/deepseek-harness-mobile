@@ -79,6 +79,8 @@ export interface ChatNodeTurnDataInjected {
 /** Stable owner currency delivered to a keyed Chat renderer. */
 export interface ChatNodeOwnerProps {
   cwd?: string | undefined
+  /** Open the current source file of a skill referenced by a sent message. */
+  openSkill: (name: string) => void
   openFile: (path: string, options?: OpenFileOptions) => void
   inspectCall: (callId: ToolCallId) => void
   forkAt: (seq: number) => void
@@ -138,6 +140,8 @@ export interface ChatViewInjected {
     /** Resolve the stable Turn-process source for one Chat Node key. */
     chatNodeProcess: (key: string) => ChatNodeProcessSource
   }
+  /** Open the current source file of a skill referenced by a sent message. */
+  openSkill: (name: string) => void
   openFile: (path: string, options?: OpenFileOptions) => Promise<void>
   loadOlder: () => void
   /** Jump loader: page history back through seq; resolves when the window covers it. */

@@ -748,6 +748,7 @@ export class AgentLoop extends Service implements AgentFactory {
    */
   private async appendUnstoredSuffix(stored: StoredSession | undefined, session: Session): Promise<void> {
     if (stored === undefined) return
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const suffix = session.snapshotEvents(SessionLogOffset(stored.storedCount))
     if (suffix.length > 0) await stored.handle.append(suffix)
     // Advance by what was stored, not to `session.seq`: an event appended

@@ -48,7 +48,7 @@ In the Web client a bare `/feedback` — picked from the composer menu or typed 
 | `task-result` | The outcome of the task |
 | `instruction-following` | Understanding and following instructions |
 | `product-interaction` | Product features and interaction |
-| `service-stability` | Service stability |
+| `service-stability` | Stability and speed |
 | `resource-cost` | Resource usage and cost |
 | `security-privacy-permission` | Security, privacy, and permissions |
 | `other` | Anything else |

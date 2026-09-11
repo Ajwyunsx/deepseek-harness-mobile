@@ -218,12 +218,17 @@ describe.each(MODE === 'record' ? ['deepseek-official'] : ['deepseek-official', 
     const like = page.getByRole('button', { name: 'Good response' })
     await like.hover()
     await like.click()
+    const dialog = page.getByRole('dialog', { name: 'Submit feedback' })
+    await dialog.getByRole('button', { name: 'Instruction understanding and following', exact: true }).click()
+    await dialog.getByRole('textbox', { name: 'Feedback details' }).fill('Clear and complete.')
+    expect(captured()).toHaveLength(releasedCount)
+    await dialog.getByRole('button', { name: 'Submit', exact: true }).click()
+    await expect.poll(() => dialog.count()).toBe(0)
     const rated = page.getByRole('button', { name: 'Remove rating' })
     await expect.poll(() => rated.getAttribute('aria-pressed')).toBe('true')
     await expectFeedbackRelease('feedback/message-put', 1)
-    // Dislike collects the category and note in the dialog; typing releases nothing.
+    // The second rating uses the same dialog; typing releases nothing.
     await page.getByRole('button', { name: 'Bad response' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Submit feedback' })
     await dialog.getByRole('button', { name: 'Task result', exact: true }).click()
     await dialog.getByRole('textbox', { name: 'Feedback details' }).fill('Read both files before answering.')
     expect(captured()).toHaveLength(releasedCount)
@@ -242,7 +247,7 @@ describe.each(MODE === 'record' ? ['deepseek-official'] : ['deepseek-official', 
       { data: { text: 'the second remark' } },
     ])
     expect(events.filter(event => event.type === 'feedback/message-put')).toMatchObject([
-      { data: { sessionId, item: { rating: 'positive' } } },
+      { data: { sessionId, item: { rating: 'positive', note: 'Clear and complete.', category: 'instruction-following' } } },
       { data: { sessionId, item: { rating: 'negative', note: 'Read both files before answering.', category: 'task-result' } } },
     ])
     expect(events.filter(event => event.type === 'feedback/message-delete')).toMatchObject([{ data: { sessionId } }])
@@ -251,7 +256,7 @@ describe.each(MODE === 'record' ? ['deepseek-official'] : ['deepseek-official', 
     expect(captured()).toHaveLength(releasedCount)
     const wire = uploads.join('\n')
     for (const text of ['the diff view is unreadable', 'the second remark',
-      'Read both files before answering.']) expect(wire).toContain(text)
+      'Clear and complete.', 'Read both files before answering.']) expect(wire).toContain(text)
     const feedback = events.flatMap<Record<string, string | undefined>>((event) => {
       switch (event.type) {
         case 'feedback/record': return [{ type: event.type, text: event.data.text }]

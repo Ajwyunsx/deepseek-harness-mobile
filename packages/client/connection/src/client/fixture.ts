@@ -34,7 +34,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo/client'
 // Type-only: the brand constructor is host-side; the fixture casts at its
 // wire-fabrication boundary (the schema layer's one-cast-point posture).
-import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import type { CommandDefinitionId, CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandDescriptor, CommandExecution, CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { CredentialInfo } from '@deepseek-ai/dsh-credentials/types'
 import type { DirectoryListing as FixtureDirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
@@ -2262,9 +2262,9 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         value: [
           { name: 'compact', description: 'fixture：压缩当前会话上下文' },
           { name: 'echo', description: 'fixture：回显参数', input: { hint: 'text to echo' } },
-          { name: 'goal', description: 'set or view the goal for a long-running task', input: { hint: '<objective>', attachments: true } },
-          { name: 'permission', description: 'Switch the permission preset (sandbox mode + approval policy)', input: { hint: '<preset>' } },
-          { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
+          { definitionId: brandString<CommandDefinitionId>('@deepseek-ai/dsh-command-goal'), name: 'goal', description: 'Set or view the goal for a long-running task', input: { hint: '<objective>', attachments: true } },
+          { definitionId: brandString<CommandDefinitionId>('@deepseek-ai/dsh-permission-presets'), name: 'permission', description: 'Switch the permission preset (sandbox mode + approval policy)', input: { hint: '<preset>' } },
+          { definitionId: brandString<CommandDefinitionId>('@deepseek-ai/dsh-plan-mode'), name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
         ],
       }
     },
@@ -2735,7 +2735,11 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   const presetRemotes = {
     // Both trusts appear, because a surface must present a locally authored
     // preset differently from one the deployment vetted.
-    list(): RpcResult<{ presets: { id: string; trust: 'system' | 'user'; isDefault: boolean }[]; authorable: boolean }> {
+    list(): RpcResult<{
+      presets: { id: string; trust: 'system' | 'user'; isDefault: boolean }[]
+      authorable: boolean
+      modeSelectionEnabled: boolean
+    }> {
       return {
         ok: true,
         value: {
@@ -2745,6 +2749,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
             isDefault: id === fixtureDefaultPreset,
           })),
           authorable: true,
+          modeSelectionEnabled: true,
         },
       }
     },

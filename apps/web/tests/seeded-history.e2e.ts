@@ -506,7 +506,7 @@ describe('web e2e: seeded history renders through cold resume', () => {
 
       // command/done can arrive before the submit reply releases the composer.
       await expect.poll(() => input.textContent(), { timeout: 10_000 }).toBe('')
-      await expect.poll(() => page.getByRole('button', { name: 'Add attachment' }).isEnabled(), { timeout: 10_000 }).toBe(true)
+      await expect.poll(() => page.getByRole('button', { name: 'Add files or run commands' }).isEnabled(), { timeout: 10_000 }).toBe(true)
       const snapshot = (await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd))
         .split(SEED_ID).join('{{seededId}}')
         .split(userId).join('{{userId}}')

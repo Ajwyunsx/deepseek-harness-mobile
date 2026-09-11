@@ -251,7 +251,7 @@ interface LlmFailure {
 
 ## 请求图片定价
 
-提供方对请求图片收取视觉 token 的适配器通过覆写 `LlmAdapter.imageRequestPricing` 声明按路由的定价，消费方经 `ctx.llm.imageRequestPricing(provider, model)` 同步解析。token 计量服务在每次计量时解析路由模型的定价，使 compaction 的压力、保留与选段都按路由请求实际发送的形式为图片历史计价；DeepSeek 适配器复现自身的请求投影（按模型的像素预算、最旧优先 offload），并用官方公布的 v4 视觉计量为保留图片定价，已完成请求仍以 provider usage 为权威锚点。
+提供方对请求图片收取视觉 token 的适配器通过覆写 `LlmAdapter.imageRequestPricing` 声明按路由的定价，消费方经 `ctx.llm.imageRequestPricing(provider, model)` 同步解析。token 计量服务在每次计量时解析路由模型的定价，使 compaction 的压力、保留与选段都按路由请求实际发送的形式为图片历史计价；DeepSeek 适配器复现自身的请求投影（按模型的像素预算、最旧优先 offload），并用官方公布的视觉计量为保留图片定价，已完成请求仍以 provider usage 为权威锚点。
 
 ```ts type-equiv
 /**

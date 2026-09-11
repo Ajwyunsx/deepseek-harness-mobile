@@ -35,6 +35,8 @@ Ordinary-session candidates come from the `skills/list` Remote; the host serves 
 
 A collapsed row renders the skill glyph, `Skill` title, and requested skill name; running calls carry the transcript shimmer, failures replace the name with the first error line, and interrupted calls use the warning state. A settled row expands into a bounded `Instructions` card containing the exact durable tool output, with the standard trajectory `Inspect` affordance when available. The row derives its name, lifecycle, and body only from the frozen call/result slice supplied by ui-tool, never from the current catalog, so replay stays stable when installed skills or their descriptions change.
 
+Hovering over `/name` highlights the entire reference. Clicking a known skill opens its provider-supplied `SKILL.md` path in the right Sidebar while keeping the token editable. An uncached click shares the per-Session catalog fetch and opens when it completes, retaining the clicked Session address. Preset changes, connection resets, and plugin disposal cancel pending previews; a later click fetches the current catalog again. Skills without a file path remain invocable but have no file preview.
+
 -----
 
 <a id="understand-the-implementation"></a>

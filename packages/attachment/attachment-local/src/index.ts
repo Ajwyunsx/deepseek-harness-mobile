@@ -1,6 +1,6 @@
 /** Local durable attachment backend rooted below `DSH_HOME`. @module @deepseek-ai/dsh-attachment-local */
 
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -15,7 +15,7 @@ import type {
   SaveImageAttachment,
   StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { dshCachePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { NormalizationPolicy } from './normalization.ts'
 import { CompressionLimiter, compressionFailure } from './compression-limiter.ts'
 import { commitPreparedImageFile, normalizedImagePath, prepareImageFile, readImageFile, validateImageFile } from './store.ts'
@@ -166,12 +166,15 @@ export class LocalAttachmentStore extends AttachmentStore {
   readonly normalizationPolicy: Readonly<NormalizationPolicy>
   /** Resolved instance-level compression limit. */
   readonly imageCompressionConcurrency: number
+  private readonly cacheRoot: string
   private readonly compression: CompressionLimiter
   private readonly requestInflight = new Map<string, SharedRequest<RequestImageAttachment>>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
-    this.root = resolve(join(resolveDshHome(config.dshHome), 'attachments', 'v1'))
+    const dshHome = resolveDshHome(config.dshHome)
+    this.root = join(dshHome, 'attachments', 'v1')
+    this.cacheRoot = dshCachePath({ dshHome }, 'attachments')
     this.imageLimits = Object.freeze({
       maxImageBytes: config.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES,
       maxImagesPerMessage: config.maxImagesPerMessage ?? DEFAULT_MAX_IMAGES_PER_MESSAGE,
@@ -267,7 +270,7 @@ export class LocalAttachmentStore extends AttachmentStore {
     if (operation === undefined) {
       const shared = new SharedRequest<RequestImageAttachment>(sharedSignal => this.compression.run(async () => {
         const request = await readRequestImageFile(
-          this.root,
+          this.cacheRoot,
           stored ?? await this.readImage(ref, sharedSignal),
           policy,
           sharedSignal,

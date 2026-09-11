@@ -37,6 +37,8 @@ A session pick inserts an atomic inline reference whose hidden `ref` and clipboa
 
 One unavailable or failed candidate domain yields no rows for that domain while the other still lists. A session-reference preparation failure occurs after prompt acceptance and terminates that agent turn.
 
+Click a file reference in the composer to preview its current contents in the right Sidebar. Quoted paths retain their spaces, and paths resolve in the composer Session. Folder and Session references retain their editing behavior.
+
 -----
 
 <a id="understand-the-implementation"></a>

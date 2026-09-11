@@ -3,8 +3,10 @@
  * CommandUiRuntime (`ctx.commandUi`) implements this face; business packages
  * consume `register` alone.
  */
+import type { ComponentType } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ClientSessionContext } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+import type { IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Copy for an option that must be acknowledged before onSelect can run. */
 export interface SelectConfirmation {
@@ -39,8 +41,7 @@ export interface PopupSelectSpec {
 
 /**
  * Business registration for the action command kind: a bare invocation
- * consumes the trigger token and runs one client-side callback (the Feedback
- * row opens the feedback dialog). It submits nothing, so an
+ * consumes the trigger token and runs one client-side callback. It submits nothing, so an
  * attachment-carrying draft never refuses it.
  */
 export interface ActionSpec {
@@ -59,13 +60,18 @@ export type CommandUiSpec = PopupSelectSpec | ActionSpec
  * One client-owned command contribution: a slash-menu entry whose behavior
  * lives entirely on the client (no host descriptor). Merged with the host
  * catalog by name — a collision with a host command fails loud at candidate
- * synthesis, never shadows.
+ * synthesis, never shadows. Row copy is read on every candidate pass, so a
+ * locale change reaches the next menu open without re-registration.
  */
 export interface CommandContribution {
   /** Command name without the leading slash (unique across contributions). */
   readonly name: string
-  /** Resolve the localized menu row description when candidates are requested. */
-  readonly description: () => string
+  /** Localized menu row title; the name itself when absent. */
+  label?(): string
+  /** Localized menu row description; the row shows none when absent. */
+  description?(): string
+  /** Menu row glyph from the shared icon set. */
+  readonly icon?: ComponentType<IconProps>
   /** Capability filter, called with a fresh projection per candidate pass. */
   available(session: ClientSessionContext): boolean
   /** The command's UI behavior. */

@@ -143,9 +143,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'list\') async remoteExportList(): Promise<AgentPresetRoster>',
-        description: 'The roster off the Host: list projected to path-free rows, with the default marked and this deployment\'s authoring capability beside it.\n\nWhether a client can open a preset\'s directory is the Host\'s own opener capability, not a roster property — a caller needing both joins them.',
+        description: 'The roster off the Host: list projected to path-free rows, with the policy-effective default marked, this deployment\'s authoring capability, and its mode-selection policy beside it.\n\nWhether a client can open a preset\'s directory is the Host\'s own opener capability, not a roster property — a caller needing both joins them.',
         parameters: [],
-        returns: 'the rows and the authoring capability.',
+        returns: 'the rows, authoring capability, and effective selection policy.',
       },
       {
         signature: 'async compositionInventory(): Promise<AgentPresetComposition[]>',
@@ -3616,7 +3616,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentPresetRoster',
-    declaration: 'export interface AgentPresetRoster {\n    readonly presets: readonly AgentPresetRow[];\n    readonly authorable: boolean;\n}',
+    declaration: 'export interface AgentPresetRoster {\n    readonly presets: readonly AgentPresetRow[];\n    readonly authorable: boolean;\n    readonly modeSelectionEnabled: boolean;\n}',
   },
   {
     name: 'AgentPresetRow',
@@ -3848,11 +3848,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CommandDefinition',
-    declaration: 'export interface CommandDefinition {\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n    readonly recordInput?: boolean;\n    readonly handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>;\n}',
+    declaration: 'export interface CommandDefinition {\n    readonly definitionId?: CommandDefinitionId;\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n    readonly recordInput?: boolean;\n    readonly handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>;\n}',
+  },
+  {
+    name: 'CommandDefinitionId',
+    declaration: 'export type CommandDefinitionId = Branded<\'CommandDefinitionId\'>;',
   },
   {
     name: 'CommandDescriptor',
-    declaration: 'export interface CommandDescriptor {\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n}',
+    declaration: 'export interface CommandDescriptor {\n    readonly definitionId?: CommandDefinitionId;\n    readonly name: string;\n    readonly description: string;\n    readonly input?: CommandInputDescriptor;\n}',
   },
   {
     name: 'CommandExecution',
@@ -5604,7 +5608,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SkillCandidate',
-    declaration: 'export interface SkillCandidate extends SkillSummary {\n    readonly rank: number;\n    readonly locator: unknown;\n    readonly path?: string;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
+    declaration: 'export interface SkillCandidate extends SkillSummary {\n    readonly rank: number;\n    readonly locator: unknown;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
   },
   {
     name: 'SkillCatalogSnapshot',
@@ -5612,11 +5616,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SkillDefinition',
-    declaration: 'export interface SkillDefinition extends SkillSummary {\n    readonly content: string;\n    readonly path?: string;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
+    declaration: 'export interface SkillDefinition extends SkillSummary {\n    readonly content: string;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
   },
   {
     name: 'SkillEntry',
-    declaration: 'export interface SkillEntry {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly modelInvocable: boolean;\n}',
+    declaration: 'export interface SkillEntry {\n    readonly path?: string;\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly modelInvocable: boolean;\n}',
   },
   {
     name: 'SkillInvocationPolicy',
@@ -5660,7 +5664,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SkillSummary',
-    declaration: 'export interface SkillSummary {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly invocation: SkillInvocationPolicy;\n    readonly source: SkillSource;\n    readonly provider: string;\n    readonly resourceBase?: SkillResourceBase;\n}',
+    declaration: 'export interface SkillSummary {\n    readonly path?: string;\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly invocation: SkillInvocationPolicy;\n    readonly source: SkillSource;\n    readonly provider: string;\n    readonly resourceBase?: SkillResourceBase;\n}',
   },
   {
     name: 'SkillViewOptions',

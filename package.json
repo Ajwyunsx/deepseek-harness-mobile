@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-root",
-  "version": "0.1.5-rc.1",
+  "version": "0.1.5-rc.2",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -35,6 +35,7 @@
     "package:desktop:mac:x64": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:x64",
     "package:desktop:mac:x64:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:x64:dir",
     "package:desktop:win:x64": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64",
+    "package:desktop:win:x64:unsigned": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64:unsigned",
     "package:desktop:win:x64:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64:dir",
     "upload:mac:arm64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:mac:arm64",
     "upload:mac:x64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:mac:x64",
@@ -184,7 +185,6 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh-agent": "workspace:^",
-    "@deepseek-ai/dsh-package-manifest": "workspace:^",
     "@deepseek-ai/dsh-tool-session-query": "workspace:^",
     "@deepseek-ai/dsh-web-fetch-http": "workspace:^",
     "@stylistic/eslint-plugin": "^5.10.0",

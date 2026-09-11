@@ -615,6 +615,8 @@ export class Session {
 
   /**
    * Return the immutable event stored at one exact sequence number.
+   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
+   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param seq - event sequence number.
    * @returns the accepted event, or undefined when the log does not contain it.
    */
@@ -626,6 +628,8 @@ export class Session {
    * Materialize an immutable snapshot of a half-open event sequence range.
    * A full current snapshot is reused until the next append; every previously
    * returned snapshot remains stable after later appends.
+   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
+   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param fromSeq - non-negative inclusive sequence number; defaults to the log start.
    * @param toSeqExclusive - non-negative exclusive sequence number; defaults to the current end.
    * @returns a frozen array of the selected deeply frozen events.
@@ -643,9 +647,12 @@ export class Session {
 
   /**
    * Return this Session's events after its fork-inherited prefix.
+   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
+   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @returns a fresh array containing child-owned events in log order.
    */
   ownEvents(): readonly SessionEvent[] {
+    // oxlint-disable-next-line typescript/no-deprecated -- Deprecated reader delegates to the deprecated range read.
     return this.snapshotEvents(this.inheritedEventCount)
   }
 
@@ -1211,6 +1218,7 @@ export class SessionStore extends Service {
   }
 
   private _forkSeed(session: Session, requestedBoundary: SessionSeq | undefined): readonly SessionEvent[] {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const lastEvent = session.snapshotEvents().at(-1)
     let boundary: SessionSeq
     if (requestedBoundary !== undefined) {
@@ -1233,6 +1241,7 @@ export class SessionStore extends Service {
       )
     }
 
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const boundaryEvent = session.eventAt(boundary)
     if (boundaryEvent === undefined || boundaryEvent.seq !== boundary) {
       throw new SessionForkError(
@@ -1240,6 +1249,7 @@ export class SessionStore extends Service {
         'INVALID_BOUNDARY',
       )
     }
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const events = session.snapshotEvents(SessionLogOffset(0), SessionLogOffset(boundary + 1))
     const lastTurnBoundary = events
       .findLast(event => event.type === 'turn/start' || event.type === 'turn/end')

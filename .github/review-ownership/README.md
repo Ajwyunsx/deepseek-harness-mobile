@@ -27,7 +27,7 @@ The publisher runs when a pull request opens, synchronizes, reopens, becomes rea
 
 ## Security
 
-The status-writing job checks out only the repository default branch. It does not check out or execute pull-request code and does not use repository secrets. The review-event workflow has no `GITHUB_TOKEN` permissions and passes only a decimal pull-request number in its run title. The publisher rejects an invalid run title and a number that does not resolve to the workflow run's current pull-request head. Pull-request reviews are treated as API data and escaped in logs.
+The status-writing job checks out only the repository default branch. It does not check out or execute pull-request code and does not use repository secrets. The review-event workflow has no `GITHUB_TOKEN` permissions and passes only a decimal pull-request number in its run title. The publisher accepts only successful `pull_request_review` runs from the review-event workflow file, identified by `workflow_run.path`; GitHub can populate `workflow_run.name` with the expanded run title. The publisher rejects an invalid run title and a number that does not resolve to the workflow run's current pull-request head. Pull-request reviews are treated as API data and escaped in logs.
 
 Approval policy changes take effect only after they merge into the default branch. This prevents an untrusted pull request from changing the program or policy for its own run.
 

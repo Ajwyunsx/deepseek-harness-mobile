@@ -59,7 +59,7 @@ kind: "package-reference"
 
 ### 滚动条重新绑定
 
-`scrollbar.css` 在 `body` 上把 `--dsh-scrollbar-thumb` 与 `--dsh-scrollbar-thumb-hover` 绑定到 l1 基础表面 token；高层级表面（菜单、浮层、对话框）在自己的容器上把它们重新绑定为 l2 token；这组变量的另一个合法目标是 `transparent`（ui-sidebar 在指针不在栏内时就这样重新绑定自己的列）。`--dsh-scrollbar-width` 镜像 WebKit 滚动条的布局宽度，供需要与占布局宽度的滚动条对齐的表面使用。两条渲染路径在构造上互斥：Firefox 走 `@supports not selector(::-webkit-scrollbar)` 内的标准属性，WebKit 系引擎走伪元素，因此 hover token 只经由伪元素这条路径渲染。
+`scrollbar.css` 在 `body` 上把 `--dsh-scrollbar-thumb` 与 `--dsh-scrollbar-thumb-hover` 绑定到 l1 基础表面 token；高层级表面（菜单、浮层、对话框）在自己的容器上把它们重新绑定为 l2 token；这组变量的另一个合法目标是 `transparent`（ui-sidebar 在指针不在栏内时就这样重新绑定自己的列）。WebKit 系浏览器还会读取 `--dsh-scrollbar-width`、`--dsh-scrollbar-thumb-border` 与 `--dsh-scrollbar-track-margin`；滚动表面可重新绑定它们，在较窄的可见滑块外保留较宽的拖动区域，或让轨道避开圆角两端。两条渲染路径在构造上互斥：Firefox 走 `@supports not selector(::-webkit-scrollbar)` 内的标准细滚动条，WebKit 系引擎走伪元素，因此几何与 hover 定制只经由伪元素路径生效。
 
 ### 偏好持久化
 

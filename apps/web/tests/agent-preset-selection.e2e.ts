@@ -247,15 +247,21 @@ describe('web e2e: agent-preset selection', () => {
     await rm(presetRoot, { recursive: true, force: true })
   })
 
-  it('offers the chip on the new-session screen, beside the workspace picker', async () => {
+  it('starts with mode selection shown on the Standard default', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-agent-preset-hero'))
     await connectFreshWorkspace(page, scaffold.workspaceCwd)
+    await page.getByRole('button', { name: 'Standard mode', exact: true }).waitFor({ timeout: 10_000 })
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Settings' })
+    await dialog.getByRole('button', { name: 'Agent presets' }).click()
+    const toggle = dialog.getByRole('switch', { name: 'Allow switching Agent modes' })
+    await dialog.getByRole('button', { name: 'New task default: Standard mode' }).waitFor({ timeout: 10_000 })
+    expect(await toggle.getAttribute('aria-checked')).toBe('true')
+    await dialog.getByRole('button', { name: 'Close' }).last().click()
 
     const snapshot = await captureStableAria(page, '[class*="heroWorkspaceRow"]', scaffold.workspaceCwd)
-
     await compareOrRefreshGolden(HERO_EXPECTED, snapshot, MODE)
-    // The chip opens on the deployment default, by the name that preset
-    // publishes rather than its directory name.
     expect(snapshot).toContain('Standard mode')
   })
 
@@ -283,6 +289,8 @@ describe('web e2e: agent-preset selection', () => {
     // The chip stages; the blank session the workspace connect produced is
     // what the stage lands on. The host's own answer is what comes back.
     await expect.poll(() => livePreset(scaffold), { timeout: 15_000 }).toBe('minimal')
+    const roster = await scaffold.ctx.agentPresets.remoteExportList()
+    expect(roster.presets.find(preset => preset.isDefault)?.id).toBe('standard')
   })
 
   it('says why a switch was refused instead of letting the chip revert in silence', async () => {
@@ -312,7 +320,8 @@ describe('web e2e: agent-preset selection', () => {
     await writeComposerDraft(page, composer, '/')
     await expect.poll(() => menuOptions(page), { timeout: 15_000 })
       .not.toEqual(expect.arrayContaining([expect.stringContaining(SKILL_NAME)]))
-    const onMinimal = await menuOptions(page)
+    // Rows read as `Title Description`; the title is the capitalized command name.
+    const onMinimal = (await menuOptions(page)).map(option => option.toLowerCase())
     expect(onMinimal.some(option => option.startsWith('compact'))).toBe(false)
     expect(onMinimal.some(option => option.startsWith('plan'))).toBe(false)
     // Preset-scoped commands follow the switch; the client's own model command
@@ -332,12 +341,45 @@ describe('web e2e: agent-preset selection', () => {
     await writeComposerDraft(page, composer, '/')
     await expect.poll(() => menuOptions(page), { timeout: 15_000 })
       .toEqual(expect.arrayContaining([expect.stringContaining(SKILL_NAME)]))
-    const onStandard = await menuOptions(page)
+    const onStandard = (await menuOptions(page)).map(option => option.toLowerCase())
     expect(onStandard.some(option => option.startsWith('compact'))).toBe(true)
     expect(onStandard.some(option => option.startsWith('goal'))).toBe(true)
     expect(onStandard.some(option => option.startsWith('plan'))).toBe(true)
     await writeComposerDraft(page, composer, '')
   }, 90_000)
+
+  it('aligns the current blank task and restores its saved default when re-enabled', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-agent-preset-disabled'))
+    await expect.poll(() => livePreset(scaffold), { timeout: 15_000 }).toBe('standard')
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Settings' })
+    await dialog.getByRole('button', { name: 'Agent presets' }).click()
+    await dialog.getByRole('button', { name: 'Set as default: Minimal mode' }).click()
+    await dialog.getByRole('button', { name: 'New task default: Minimal mode' }).waitFor({ timeout: 10_000 })
+    await expect.poll(() => livePreset(scaffold), { timeout: 15_000 }).toBe('minimal')
+    const toggle = dialog.getByRole('switch', { name: 'Allow switching Agent modes' })
+    await toggle.click()
+    await expect.poll(() => toggle.getAttribute('aria-checked')).toBe('false')
+    await dialog.getByRole('button', { name: 'Default: Standard mode' }).waitFor({ timeout: 10_000 })
+    await dialog.getByRole('button', { name: 'Close' }).last().click()
+
+    await expect.poll(() => page.getByRole('button', { name: / mode$/ }).count()).toBe(0)
+    await expect.poll(() => livePreset(scaffold), { timeout: 15_000 }).toBe('standard')
+
+    // The switch controls availability only: re-enabling restores the saved
+    // default and aligns this same still-blank task with it.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    const reopened = page.getByRole('dialog', { name: 'Settings' })
+    await reopened.getByRole('button', { name: 'Agent presets' }).click()
+    const reopenedToggle = reopened.getByRole('switch', { name: 'Allow switching Agent modes' })
+    await reopenedToggle.click()
+    await expect.poll(() => reopenedToggle.getAttribute('aria-checked')).toBe('true')
+    await reopened.getByRole('button', { name: 'New task default: Minimal mode' }).waitFor({ timeout: 10_000 })
+    await reopened.getByRole('button', { name: 'Close' }).last().click()
+    await expect.poll(() => livePreset(scaffold), { timeout: 15_000 }).toBe('minimal')
+    await page.getByRole('button', { name: 'Minimal mode' }).waitFor({ timeout: 10_000 })
+  })
 
   it('labels a resumed session with the preset it was created under', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-agent-preset-header'))

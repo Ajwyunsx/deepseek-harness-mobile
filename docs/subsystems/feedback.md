@@ -27,7 +27,7 @@ interface MessageFeedbackItem {
   readonly rating: MessageFeedbackRating
   /** Optional explanation, preserved verbatim after validation. */
   readonly note?: string
-  /** Category the human filed a negative judgment under. */
+  /** Category the human filed the judgment under. */
   readonly category?: FeedbackCategory
   /** Equality-only token replaced by every material create or update. */
   readonly version: MessageFeedbackVersion
@@ -298,9 +298,9 @@ When explicitly enabled, [`session-log-deepseek`](../../packages/session/session
 
 The controls are the `feedback` entry (order 10) of the `conversation.chat.assistant-actions` list slot, which `ui-conversation` declares and renders inside the finalized assistant message's IconActions row. `AssistantMessageNode` carries the optional `messageId` from the `assistant/message` event. The field is absent on interruption-frozen partials, and the render site skips the slot when it is absent. The strip renders once per turn, on the closing assistant message: the Host accepts every append-origin step message as a target, but earlier steps of a multi-step turn render tool rows rather than a rateable body, so the UI exposes a narrower set than the Host contract allows.
 
-One `MessageFeedbackController` per Session backs every message control in that Session: a single `list` read seeds the whole transcript, deferred to first hover or focus rather than fired on mount. Each mutation sends the version that controller last observed as `ifVersion`; a `version-conflict` reply carries the authoritative item, so the controller reconciles from the reply instead of refetching. Mutations serialize per Session so a queued operation compares against the committed version. A `connection/reset` refreshes only Sessions already read.
+One `MessageFeedbackController` per Session backs every message control in that Session: a single `list` read seeds the whole transcript, deferred to first hover or focus rather than fired on mount. Each mutation sends the version that controller last observed as `ifVersion`; a `version-conflict` reply carries the authoritative item, so the controller reconciles from the reply instead of refetching. Mutations serialize per Session so a queued operation compares against the committed version. The injected `retract` operation rechecks the committed rating inside that queue and becomes a no-op after a concurrent change, so stale UI cannot bypass the dialog by recording a bare rating. A `connection/reset` refreshes only Sessions already read.
 
-Like records the bare positive judgment at once and shows the acknowledgement toast. Dislike opens the Session's feedback dialog, the `feedback-dialog` entry of `conversation.input.overlay`: the shared Modal card with seven category chips and a detail box. Submit puts a negative judgment carrying the chosen category and the trimmed description, or neither. The same dialog opens for the Session from a bare `/feedback` — a decoration `ui-commands` routes as an `action` — and then records through `sessionFeedback.record`; `/feedback <text>` keeps the Host command path. Clicking a recorded rating retracts it.
+Either unrecorded rating opens the Session's feedback dialog, the `feedback-dialog` entry of `conversation.input.overlay`: the shared Modal card with seven category chips and a detail box. Submit puts the selected judgment carrying the chosen category and the trimmed description, or neither; success closes the dialog and shows the acknowledgement toast, while failure keeps the dialog and draft open and shows a warning toast. The same dialog opens for the Session from a bare `/feedback` — a decoration `ui-commands` routes as an `action` — and then records through `sessionFeedback.record`; `/feedback <text>` keeps the Host command path. Clicking a recorded rating retracts it without opening the dialog.
 
 ## Boundaries and limitations
 

@@ -55,10 +55,10 @@
   - code: present
   - text: succeeded for
   - code:
-    - button "Open report.txt in default app": report.txt
+    - button "Open report.txt in sidebar": report.txt
   - text: and
   - code:
-    - button "Open 说明.txt in default app": 说明.txt
+    - button "Open 说明.txt in sidebar": 说明.txt
   - text: ", after which the program deliberately threw the string"
   - code: AFTER_PRESENT
   - text: — no retries, no extra files.
@@ -91,9 +91,7 @@
   - text: Ran for {{duration}}
 - text: {{clock}}
 - textbox "Message or run a task, / commands, @ files or sessions"
-- button "Commands":
-  - img
-- button "Add attachment":
+- button "Add files or run commands":
   - img
 - 'button "Access mode, current: Workspace Write"': Workspace Write
 - button "Select model, current DeepSeek-V4-Flash":

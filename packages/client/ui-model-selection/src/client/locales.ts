@@ -10,6 +10,7 @@
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
+  'command.label': '模型',
   'command.description': '选择本会话使用的模型',
   'option.loadError': '目录加载失败：{message}',
   'option.deepseekV4Flash.description': '快速、高效且经济；适合目标明确、常规或并行任务。',
@@ -37,6 +38,7 @@ export type ModelKey = keyof typeof zh
 
 /** English dictionary, checked complete against the zh key set. */
 export const en = {
+  'command.label': 'Model',
   'command.description': 'Select the model for this conversation',
   'option.loadError': 'Catalog failed to load: {message}',
   'option.deepseekV4Flash.description': 'Fast, efficient, and economical; suited to focused, routine, or parallel tasks.',

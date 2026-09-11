@@ -1,6 +1,6 @@
 - banner:
   - navigation "Session hierarchy":
-    - button "/user-invoke-demo and confirm the fixtur" [disabled]
+    - button "/user-invoke-demo @\"meeting notes.md\" an" [disabled]
   - img
   - text: Standard mode
   - button "More actions":
@@ -14,7 +14,11 @@
   - img
   - img
   - text: System prompt
-- text: /user-invoke-demo and confirm the fixture wiring {{clock}}
+- button "/user-invoke-demo"
+- button "meeting notes.md":
+  - img
+  - text: meeting notes.md
+- text: and confirm the fixture wiring {{clock}}
 - button "Copy":
   - img
 - button "Thought for a while" [expanded]:
@@ -42,9 +46,7 @@
   - text: Ran for {{duration}}
 - text: {{clock}}
 - textbox "Message or run a task, / commands, @ files or sessions"
-- button "Commands":
-  - img
-- button "Add attachment":
+- button "Add files or run commands":
   - img
 - 'button "Access mode, current: Workspace Write"': Workspace Write
 - button "Select model, current DeepSeek-V4-Flash":

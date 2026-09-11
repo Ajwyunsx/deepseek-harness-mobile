@@ -229,7 +229,8 @@ export class TokenMeter extends Service {
     }
 
     while (state.consumedEvents < session.seq) {
-      // oxlint-disable-next-line typescript/no-non-null-assertion -- contiguous session seqs index the durable log
+      // Contiguous session seqs index the durable log; existing Session history read, migration deferred.
+      // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
       const event = session.eventAt(SessionSeq(state.consumedEvents))!
       this._foldEvent(state, event)
       state.consumedEvents = SessionLogOffset(state.consumedEvents + 1)

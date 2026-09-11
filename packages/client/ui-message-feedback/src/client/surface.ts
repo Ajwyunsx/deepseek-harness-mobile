@@ -1,8 +1,8 @@
 /**
  * One Session's feedback surface: the message-feedback object layer and the
  * dialog controller, plus the routing between them. A message target puts a
- * negative judgment through the message controller; the Session target
- * records through the `sessionFeedback` Remote.
+ * selected judgment through the message controller; the Session target records
+ * through the `sessionFeedback` Remote.
  * @module @deepseek-ai/dsh-client-ui-message-feedback/client/surface
  */
 
@@ -26,7 +26,7 @@ export class FeedbackSurface {
   constructor(private readonly ctx: ClientContext, private readonly sessionId: SessionId) {
     this.feedback = new MessageFeedbackController(ctx, sessionId)
     this.dialog = new FeedbackDialogController((target, entry) => target.kind === 'message'
-      ? this.feedback.rate(target.messageId, 'negative', entry)
+      ? this.feedback.rate(target.messageId, target.rating, entry)
       : this.recordSession(entry))
   }
 

@@ -1,10 +1,9 @@
 /**
  * Per-message feedback controls: the Like/Dislike pair inside the assistant
- * message's IconActions row, between copy and branch. Like records at once
- * and raises the Session's acknowledgement toast; Dislike opens the Session's
- * feedback dialog, whose submission records the negative judgment with its
- * category and text. Clicking the recorded rating retracts it. A recorded
- * rating shows the filled glyph so the signal survives a pointer leaving the row.
+ * message's IconActions row, between copy and branch. Either rating opens the
+ * Session's feedback dialog, whose submission records that judgment with its
+ * category and text. Clicking the recorded rating retracts it. A recorded rating
+ * shows the filled glyph so the signal survives a pointer leaving the row.
  * @module @deepseek-ai/dsh-client-ui-message-feedback/client/MessageFeedbackActions
  */
 
@@ -12,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   IconDislikeFill16, IconDislikeOutline16, IconLikeFill16, IconLikeOutline16, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MessageFeedbackRating } from '@deepseek-ai/dsh-message-feedback/types'
 import type { MessageFeedbackActionFailure } from './controller.ts'
 import type { MessageFeedbackActionProps } from './slots.ts'
 import css from './MessageFeedbackActions.module.css'
@@ -23,7 +23,7 @@ import css from './MessageFeedbackActions.module.css'
  * @returns the rating buttons with any failure notice beside them.
  */
 export function MessageFeedbackActions({
-  messageId, ensure, current, toggle, openDialog, acknowledge, useFeedback, t,
+  messageId, ensure, current, retract, openDialog, useFeedback, t,
 }: MessageFeedbackActionProps) {
   const item = useFeedback(view => view.items.get(messageId))
   const loadFailed = useFeedback(view => view.status === 'error')
@@ -47,43 +47,29 @@ export function MessageFeedbackActions({
     return result.error.code === 'version-conflict' ? t('error.conflict') : t('error.generic')
   }, [t])
 
-  // The controller decides record-vs-retract from the committed item, so a
-  // click that lands before the first list read still toggles the stored
-  // value; the reply says which happened, and only a recording is acknowledged.
-  const onLike = useCallback(() => {
-    setPending(true)
-    setFailure(null)
-    void toggle(messageId, 'positive').then((result) => {
-      if (!alive.current) return
-      setPending(false)
-      if (!result.ok) {
-        setFailure(errorCopy(result))
-        return
-      }
-      if (result.rating === 'positive') acknowledge()
-    })
-  }, [acknowledge, errorCopy, messageId, toggle])
-
-  // A recorded Dislike retracts on click; otherwise the dialog collects the
-  // reason and records the judgment on submit. The decision waits for the
+  // A recorded rating retracts on click; either unrecorded rating opens the
+  // dialog and records only after submission. The decision waits for the
   // seeding read, so a click on a cold row still sees the stored judgment.
-  const onDislike = useCallback(() => {
+  const choose = useCallback((nextRating: MessageFeedbackRating) => {
     setPending(true)
     setFailure(null)
     void ensure().then((loaded) => {
       if (!alive.current) return
-      if (!loaded.ok || current(messageId)?.rating !== 'negative') {
+      if (!loaded.ok || current(messageId)?.rating !== nextRating) {
         setPending(false)
-        openDialog(messageId)
+        openDialog(messageId, nextRating)
         return
       }
-      void toggle(messageId, 'negative').then((result) => {
+      void retract(messageId, nextRating).then((result) => {
         if (!alive.current) return
         setPending(false)
         if (!result.ok) setFailure(errorCopy(result))
       })
     })
-  }, [current, ensure, errorCopy, messageId, openDialog, toggle])
+  }, [current, ensure, errorCopy, messageId, openDialog, retract])
+
+  const onLike = useCallback(() => { choose('positive') }, [choose])
+  const onDislike = useCallback(() => { choose('negative') }, [choose])
 
   const likeLabel = rating === 'positive' ? t('action.likeActive') : t('action.like')
   const dislikeLabel = rating === 'negative' ? t('action.dislikeActive') : t('action.dislike')

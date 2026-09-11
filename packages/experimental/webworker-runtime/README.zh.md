@@ -32,7 +32,7 @@ kind: "package-library"
 
 验收在 `apps/web/tests/preview-boot.e2e.ts`：静态服务真实构建页面，在 headless Chromium 里驱动 pre-boot 选择面板与 Worker 激活。空白选择验证首次启动；`vfs-example` overlay 提供普通 workspace 文件与明文 persistence 产物，无需模型请求即可验证 Workspace/Session 冷发现、工具呈现、subagent 导航和历史分页。fixture 生成器负责当前代日志与投影缓存；已提交的前代日志逐字节保持不变，与它们并存。选择面板为 WebFS 保留独立的用户授权来源；该 provider 不读取内置 fixture。
 
-[已构建 bundle 导入检查](tests/compile/transform-corpus-check.ts)在库构建后检查裸 Node 导入。Dockkit 例外仅接受 Node 针对预期样式表报告的未知扩展名错误；其他失败以及意外成功的豁免导入仍然报错。参见 [CI 观察决策](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.zh.md)。
+[已构建 bundle 导入检查](tests/compile/transform-corpus-check.ts)在库构建后检查裸 Node 导入。Dockkit 例外接受 Node 针对任意样式表报告的未知 `.css` 扩展名错误，而不限定某一固定路径；其他扩展名、错误码或消息，以及意外成功的豁免导入，仍然报错。参见 [样式表豁免决策](../../../.agents/notes/implemented/bug-fix/2026-09-10-built-bundle-css-exemption.zh.md)。
 
 -----
 

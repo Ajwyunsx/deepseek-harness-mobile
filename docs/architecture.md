@@ -48,9 +48,9 @@ The Python SDK follows the same application architecture. Its runtime wheel pack
 
 ## Desktop application
 
-The [Electron desktop application](../apps/desktop/README.md) owns the reserved `$DSH_HOME/profiles/desktop` npm project. Each signed Electron release binds one exact dsh version and carries a first-party offline seed; startup installs that version into the writable profile with the bundled pnpm, while retaining exact desktop-plugin versions from the previous profile. CLI profiles share supported product data under `$DSH_HOME`, but never executable packages, plugin activation, lockfiles, or `node_modules` with Desktop.
+The [Electron desktop application](../apps/desktop/README.md) carries its exact dsh production runtime in signed application resources. The reserved `$DSH_HOME/profiles/desktop` contains external plugins and links to host-owned packages; compatible upgrades retain plugin files and refresh these links without installing core dependencies. CLI profiles share supported product data under `$DSH_HOME`, while executable packages, plugin activation, lockfiles, and package-manager state remain separate.
 
-Electron starts the private Desktop Host package under its bundled upstream Node.js process; that package loads the installed dsh backend and matching client graph from the reserved profile. Unary RPC, Remote streams, and version-matched client assets cross versioned framed byte pipes with Node IPC reserved for lifecycle control, then reach the renderer through the secure `dsh-app://` protocol; the desktop composition opens no Web server or loopback port. Only shell-owned UI can run plugin transactions through the bundled pnpm and its private `$DSH_HOME/desktop/pnpm/store`.
+Electron starts the private Desktop Host package under its bundled upstream Node.js process; that package loads the bundled dsh backend and matching client graph together with enabled profile plugins. Unary RPC, Remote streams, and version-matched client assets cross versioned framed byte pipes with Node IPC reserved for lifecycle control, then reach the renderer through the secure `dsh-app://` protocol; the desktop composition opens no Web server or loopback port. Only shell-owned UI can run plugin transactions through the bundled pnpm and its private `$DSH_HOME/desktop/pnpm/store`.
 
 ## Core packages
 

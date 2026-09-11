@@ -82,14 +82,6 @@
   box-shadow: 0 0 0 1px var(--dsw-alias-border-l3);
 }
 
-.failure {
-  display: block;
-  margin-top: 8px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 13px;
-  line-height: 20px;
-}
-
 .submit {
   width: 100%;
   height: 44px;

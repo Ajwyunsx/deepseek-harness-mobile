@@ -23,7 +23,7 @@ The VFS image packer: turns one composed profile into the gzip-compressed base t
 <a id="use-this-package"></a>
 ## Use this package
 
-The [`DshConfigTreeDeclaration`](../../util/package-manifest/README.md) type describes each `dsh.configTrees` entry; this packer validates it and resolves its source directory.
+The packer owns the internal `dsh.configTrees` declaration, its validation, and source directory resolution in [`src/repository.ts`](src/repository.ts). This field is not part of the public plugin manifest API.
 
 The pack is a three-layer standard stack:
 

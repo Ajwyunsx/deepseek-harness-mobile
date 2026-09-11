@@ -48,7 +48,7 @@ kind: "package-reference"
 | `task-result` | 任务结果 |
 | `instruction-following` | 指令理解与遵循 |
 | `product-interaction` | 产品功能与交互 |
-| `service-stability` | 服务稳定性 |
+| `service-stability` | 稳定性和速度 |
 | `resource-cost` | 资源使用与费用 |
 | `security-privacy-permission` | 安全隐私与权限 |
 | `other` | 其他 |

@@ -11,7 +11,9 @@
     },
     {
       "type": "feedback/message-put",
-      "rating": "positive"
+      "rating": "positive",
+      "note": "Clear and complete.",
+      "category": "instruction-following"
     },
     {
       "type": "feedback/message-put",

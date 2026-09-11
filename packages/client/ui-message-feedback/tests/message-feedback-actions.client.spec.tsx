@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 /**
  * MessageFeedbackActions rendering and gestures: the rating buttons reflect the
- * shared view with the filled glyph for a recorded rating, Like records at once
- * and raises the acknowledgement only when a rating was recorded, Dislike opens
- * the Session's dialog unless it retracts a recorded Dislike, the Session's
- * feedback is read on first interaction rather than on mount, and a rejected
- * mutation surfaces inline without losing the authoritative state.
+ * shared view with the filled glyph for a recorded rating, either unrecorded
+ * rating opens the Session's dialog, clicking the recorded rating retracts it,
+ * the Session's feedback is read on first interaction rather than on mount, and
+ * a rejected retraction surfaces inline without losing the authoritative state.
  */
 import { useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -18,7 +17,7 @@ import type {
 } from '@deepseek-ai/dsh-message-feedback/types'
 import { MessageFeedbackActions } from '../src/client/MessageFeedbackActions.tsx'
 import type {
-  MessageFeedbackActionResult, MessageFeedbackToggleResult, MessageFeedbackView,
+  MessageFeedbackActionResult, MessageFeedbackView,
 } from '../src/client/controller.ts'
 import { zh } from '../src/client/locales.ts'
 
@@ -44,7 +43,7 @@ function mount(options: {
   /** The controller's committed item when it differs from the rendered view (a cold row). */
   committed?: MessageFeedbackItem
   ensureResult?: MessageFeedbackActionResult
-  toggleResult?: MessageFeedbackToggleResult
+  retractResult?: MessageFeedbackActionResult
   status?: MessageFeedbackView['status']
 } = {}) {
   const view: MessageFeedbackView = {
@@ -53,19 +52,15 @@ function mount(options: {
     error: null,
   }
   const ensure = vi.fn(() => Promise.resolve<MessageFeedbackActionResult>(options.ensureResult ?? { ok: true }))
-  // The controller owns record-vs-retract, so the double stands in for it:
-  // matching the shown rating retracts, anything else records.
-  const toggle = vi.fn((_id: MessageId, next: MessageFeedbackRating) =>
-    Promise.resolve<MessageFeedbackToggleResult>(options.toggleResult
-      ?? { ok: true, rating: options.current?.rating === next ? null : next }))
-  const openDialog = vi.fn((_id: MessageId) => {})
-  const acknowledge = vi.fn(() => {})
+  const retract = vi.fn((_id: MessageId, _rating: MessageFeedbackRating) =>
+    Promise.resolve<MessageFeedbackActionResult>(options.retractResult ?? { ok: true }))
+  const openDialog = vi.fn((_id: MessageId, _rating: MessageFeedbackRating) => {})
   const current = vi.fn((_id: MessageId) => options.committed ?? options.current)
   const useFeedback = (<T,>(select: (v: MessageFeedbackView) => T): T =>
     useSyncExternalStore(() => () => {}, () => select(view))) as never
-  const props = { messageId: MSG, ensure, current, toggle, openDialog, acknowledge, useFeedback, t } as unknown as
+  const props = { messageId: MSG, ensure, current, retract, openDialog, useFeedback, t } as unknown as
     Parameters<typeof MessageFeedbackActions>[0]
-  return { ...render(<MessageFeedbackActions {...props} />), ensure, toggle, openDialog, acknowledge }
+  return { ...render(<MessageFeedbackActions {...props} />), ensure, retract, openDialog }
 }
 
 describe('MessageFeedbackActions', () => {
@@ -103,24 +98,32 @@ describe('MessageFeedbackActions', () => {
     expect(ui.ensure).not.toHaveBeenCalled()
   })
 
-  it('records a Like at once and acknowledges it', async () => {
+  it('opens the dialog for a Like instead of recording it', async () => {
     const ui = mount()
 
     fireEvent.click(ui.getByLabelText(zh['action.like']))
 
-    await waitFor(() => { expect(ui.toggle).toHaveBeenCalledWith(MSG, 'positive') })
-    await waitFor(() => { expect(ui.acknowledge).toHaveBeenCalledTimes(1) })
-    expect(ui.openDialog).not.toHaveBeenCalled()
+    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG, 'positive') })
+    expect(ui.retract).not.toHaveBeenCalled()
   })
 
-  it('retracts a recorded Like on click without acknowledging', async () => {
+  it('opens the dialog for a Like that replaces a recorded Dislike', async () => {
+    const ui = mount({ current: item({ rating: 'negative' }) })
+
+    fireEvent.click(ui.getByLabelText(zh['action.like']))
+
+    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG, 'positive') })
+    expect(ui.retract).not.toHaveBeenCalled()
+  })
+
+  it('retracts a recorded Like on click without the dialog', async () => {
     const ui = mount({ current: item({ rating: 'positive' }) })
 
     fireEvent.click(ui.getByLabelText(zh['action.likeActive']))
 
-    await waitFor(() => { expect(ui.toggle).toHaveBeenCalledWith(MSG, 'positive') })
+    await waitFor(() => { expect(ui.retract).toHaveBeenCalledWith(MSG, 'positive') })
     await waitFor(() => { expect(ui.getByLabelText(zh['action.likeActive']).hasAttribute('disabled')).toBe(false) })
-    expect(ui.acknowledge).not.toHaveBeenCalled()
+    expect(ui.openDialog).not.toHaveBeenCalled()
   })
 
   it('opens the dialog for a Dislike instead of recording it', async () => {
@@ -128,8 +131,8 @@ describe('MessageFeedbackActions', () => {
 
     fireEvent.click(ui.getByLabelText(zh['action.dislike']))
 
-    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG) })
-    expect(ui.toggle).not.toHaveBeenCalled()
+    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG, 'negative') })
+    expect(ui.retract).not.toHaveBeenCalled()
   })
 
   it('opens the dialog for a Dislike that replaces a recorded Like', async () => {
@@ -137,8 +140,8 @@ describe('MessageFeedbackActions', () => {
 
     fireEvent.click(ui.getByLabelText(zh['action.dislike']))
 
-    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG) })
-    expect(ui.toggle).not.toHaveBeenCalled()
+    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG, 'negative') })
+    expect(ui.retract).not.toHaveBeenCalled()
   })
 
   it('opens the dialog for a Dislike when the seeding read fails, leaving the put to decide', async () => {
@@ -146,8 +149,8 @@ describe('MessageFeedbackActions', () => {
 
     fireEvent.click(ui.getByLabelText(zh['action.dislike']))
 
-    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG) })
-    expect(ui.toggle).not.toHaveBeenCalled()
+    await waitFor(() => { expect(ui.openDialog).toHaveBeenCalledWith(MSG, 'negative') })
+    expect(ui.retract).not.toHaveBeenCalled()
   })
 
   it('decides a Dislike from the committed item, so a cold row retracts a stored Dislike', async () => {
@@ -155,7 +158,7 @@ describe('MessageFeedbackActions', () => {
 
     fireEvent.click(ui.getByLabelText(zh['action.dislike']))
 
-    await waitFor(() => { expect(ui.toggle).toHaveBeenCalledWith(MSG, 'negative') })
+    await waitFor(() => { expect(ui.retract).toHaveBeenCalledWith(MSG, 'negative') })
     expect(ui.openDialog).not.toHaveBeenCalled()
   })
 
@@ -164,28 +167,28 @@ describe('MessageFeedbackActions', () => {
 
     fireEvent.click(ui.getByLabelText(zh['action.dislikeActive']))
 
-    await waitFor(() => { expect(ui.toggle).toHaveBeenCalledWith(MSG, 'negative') })
+    await waitFor(() => { expect(ui.retract).toHaveBeenCalledWith(MSG, 'negative') })
     expect(ui.openDialog).not.toHaveBeenCalled()
-    expect(ui.acknowledge).not.toHaveBeenCalled()
   })
 
-  it('reports a lost race with the conflict copy', async () => {
+  it('reports a lost retraction race with the conflict copy', async () => {
     const ui = mount({
-      toggleResult: { ok: false, error: { code: 'version-conflict', message: 'feedback changed elsewhere' } },
+      current: item({ rating: 'positive' }),
+      retractResult: { ok: false, error: { code: 'version-conflict', message: 'feedback changed elsewhere' } },
     })
 
-    fireEvent.click(ui.getByLabelText(zh['action.like']))
+    fireEvent.click(ui.getByLabelText(zh['action.likeActive']))
 
     await waitFor(() => { expect(ui.getByText(zh['error.conflict'])).toBeTruthy() })
-    expect(ui.acknowledge).not.toHaveBeenCalled()
   })
 
-  it('reports any other failure with the generic copy', async () => {
+  it('reports any other retraction failure with the generic copy', async () => {
     const ui = mount({
-      toggleResult: { ok: false, error: { code: 'target-not-found', message: 'no such message' } },
+      current: item({ rating: 'positive' }),
+      retractResult: { ok: false, error: { code: 'target-not-found', message: 'no such message' } },
     })
 
-    fireEvent.click(ui.getByLabelText(zh['action.like']))
+    fireEvent.click(ui.getByLabelText(zh['action.likeActive']))
 
     await waitFor(() => { expect(ui.getByText(zh['error.generic'])).toBeTruthy() })
   })
@@ -193,7 +196,7 @@ describe('MessageFeedbackActions', () => {
   it('reports a failed retraction of a recorded Dislike', async () => {
     const ui = mount({
       current: item({ rating: 'negative' }),
-      toggleResult: { ok: false, error: { code: 'version-conflict', message: 'feedback changed elsewhere' } },
+      retractResult: { ok: false, error: { code: 'version-conflict', message: 'feedback changed elsewhere' } },
     })
 
     fireEvent.click(ui.getByLabelText(zh['action.dislikeActive']))
@@ -203,18 +206,19 @@ describe('MessageFeedbackActions', () => {
 
   it('publishes no state after the row unmounts mid-flight', async () => {
     let release = (): void => {}
-    const gate = new Promise<MessageFeedbackToggleResult>((resolve) => {
+    const gate = new Promise<MessageFeedbackActionResult>((resolve) => {
       release = () => { resolve({ ok: false, error: { code: 'target-not-found', message: 'gone' } }) }
     })
-    const view: MessageFeedbackView = { status: 'ready', items: new Map(), error: null }
+    const recorded = item({ rating: 'positive' })
+    const view: MessageFeedbackView = { status: 'ready', items: new Map([[MSG, recorded]]), error: null }
     const useFeedback = (<T,>(select: (v: MessageFeedbackView) => T): T =>
       useSyncExternalStore(() => () => {}, () => select(view))) as never
     const props = {
       messageId: MSG,
       ensure: vi.fn(() => Promise.resolve<MessageFeedbackActionResult>({ ok: true })),
-      toggle: vi.fn(() => gate),
+      current: () => recorded,
+      retract: vi.fn(() => gate),
       openDialog: vi.fn(),
-      acknowledge: vi.fn(),
       useFeedback,
       t,
     } as unknown as Parameters<typeof MessageFeedbackActions>[0]
@@ -223,7 +227,7 @@ describe('MessageFeedbackActions', () => {
     const onError = (event: ErrorEvent): void => { errors.push(event.error) }
     window.addEventListener('error', onError)
 
-    fireEvent.click(ui.getByLabelText(zh['action.like']))
+    fireEvent.click(ui.getByLabelText(zh['action.likeActive']))
     ui.unmount()
     release()
     await gate
@@ -243,9 +247,8 @@ describe('MessageFeedbackActions', () => {
       messageId: MSG,
       ensure: vi.fn(() => gate),
       current: () => undefined,
-      toggle: vi.fn(),
+      retract: vi.fn(),
       openDialog,
-      acknowledge: vi.fn(),
       useFeedback,
       t,
     } as unknown as Parameters<typeof MessageFeedbackActions>[0]
@@ -266,7 +269,7 @@ describe('MessageFeedbackActions', () => {
 
   it('publishes no state after the row unmounts mid-retraction', async () => {
     let release = (): void => {}
-    const gate = new Promise<MessageFeedbackToggleResult>((resolve) => {
+    const gate = new Promise<MessageFeedbackActionResult>((resolve) => {
       release = () => { resolve({ ok: false, error: { code: 'target-not-found', message: 'gone' } }) }
     })
     const view: MessageFeedbackView = {
@@ -278,9 +281,8 @@ describe('MessageFeedbackActions', () => {
       messageId: MSG,
       ensure: vi.fn(() => Promise.resolve<MessageFeedbackActionResult>({ ok: true })),
       current: () => item({ rating: 'negative' }),
-      toggle: vi.fn(() => gate),
+      retract: vi.fn(() => gate),
       openDialog: vi.fn(),
-      acknowledge: vi.fn(),
       useFeedback,
       t,
     } as unknown as Parameters<typeof MessageFeedbackActions>[0]
@@ -292,7 +294,7 @@ describe('MessageFeedbackActions', () => {
     fireEvent.click(ui.getByLabelText(zh['action.dislikeActive']))
     // The retraction starts only after the seeding read settles; unmount
     // while that retraction is in flight.
-    await waitFor(() => { expect(props.toggle).toHaveBeenCalledWith(MSG, 'negative') })
+    await waitFor(() => { expect(props.retract).toHaveBeenCalledWith(MSG, 'negative') })
     ui.unmount()
     release()
     await gate
@@ -310,10 +312,11 @@ describe('MessageFeedbackActions', () => {
   it('prefers the action failure over the load notice', async () => {
     const ui = mount({
       status: 'error',
-      toggleResult: { ok: false, error: { code: 'target-not-found', message: 'gone' } },
+      current: item({ rating: 'positive' }),
+      retractResult: { ok: false, error: { code: 'target-not-found', message: 'gone' } },
     })
 
-    fireEvent.click(ui.getByLabelText(zh['action.like']))
+    fireEvent.click(ui.getByLabelText(zh['action.likeActive']))
 
     await waitFor(() => { expect(ui.getByText(zh['error.generic'])).toBeTruthy() })
     expect(ui.queryByText(zh['error.load'])).toBeNull()

@@ -156,7 +156,7 @@ Files 模式通过 `maxRequestFilesBytes` 与 `maxImagesPerRequest` 限制保留
 
 #### Token 影响
 
-提供方分词决定精确的文本与图片 token 输入。适配器声明按路由的 `imageRequestPricing`：它根据持久记录中的字节长度复现最旧优先的图片 offload，并按投影后的尺寸使用公开的 v4 视觉计量规则（14 px patch 网格、3:1 降采样、单图 384 token 上限、最坏情况下的对齐 pad）为每张保留图片计价。这使 token 计量服务可以在请求发出前为图片压力定价；上报的 usage 仍是权威值。推理回传会把每个推理轮次的思维链带进后续请求，而丢弃超预算图片会避免再次为它们付费。可用时报告缓存读取用量。`totalTokens` 是精确的 `prompt_tokens + completion_tokens` 汇总值；提供方给出的 `total_tokens` 不一致时省略该值。
+提供方分词决定精确的文本与图片 token 输入。适配器声明按路由的 `imageRequestPricing`：它根据持久记录中的字节长度复现最旧优先的图片 offload，并按投影后的尺寸使用公开的视觉计量规则（14 px patch 网格、3:1 降采样、544×544 放大下限、单图 1024 token 上限）为每张保留图片计价。这使 token 计量服务可以在请求发出前为图片压力定价；上报的 usage 仍是权威值。推理回传会把每个推理轮次的思维链带进后续请求，而丢弃超预算图片会避免再次为它们付费。可用时报告缓存读取用量。`totalTokens` 是精确的 `prompt_tokens + completion_tokens` 汇总值；提供方给出的 `total_tokens` 不一致时省略该值。
 
 #### KV Cache 影响
 
@@ -189,6 +189,8 @@ loop 保留的响应块会追加到下一个请求，并保留其更早的可复
 - **跳过插件新增的内容块类型**——核心文本与受支持图片块会被序列化，空工具输出以字面量 `(no output)` 过线。
 - **图片是仅用于输入的持久附件**——不支持直接外部 URL 与 assistant 图片输出；DeepSeek 输入通常使用 Files API，仅在单次请求恢复时使用内联 base64。
 - 默认目录预注册 `deepseek-flash` 及其文本、图片和历史内更新能力，不探测网关可用性。网关开放该 ID 前，请求可能以 `INVALID_REQUEST` 失败。配置 `DEEPSEEK_API_KEY` 和支持该 ID 的网关后，设置 `DEEPSEEK_FLASH_E2E=1` 可启用[本包 e2e 测试文件](tests/adapter.e2e.ts)中的 Chat Completions 协议验证。
+
+- 默认请求图片投影限制为 640,000 总像素，低于提供方约 1300×1300 的处理预算，可能丢弃可用细节。每个模型的 `imagePixelBudget` 可以覆盖默认值。更改默认值会改变请求内容，需要单独验证快照（[决策](../../../.agents/notes/implemented/bug-fix/2026-09-10-deepseek-image-token-calculator-v41.zh.md)）。
 
 <a id="dev-note"></a>
 ### 开发备注

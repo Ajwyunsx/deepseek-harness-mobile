@@ -208,13 +208,15 @@ export async function runApprovalCheck({ event, policySource, api, runUrl, write
 }
 
 /**
- * Resolve the reviewed pull request from a completed review-event workflow run.
+ * Resolve the reviewed pull request from a completed run of the review-event workflow file.
  * @param {{event: unknown, api: (path: string, options?: {method?: string, body?: unknown}) => Promise<unknown>}} options Trusted workflow inputs.
  * @returns {Promise<Record<string, unknown> | null>} Event with a current pull request, or null after the pull-request head changes.
  */
 export async function approvalEventFromWorkflowRun({ event, api }) {
   const repository = repositoryFromEvent(event)
-  if (!isRecord(event.workflow_run) || event.workflow_run.name !== 'weighted-approval-review-event'
+  // GitHub can expand run-name into name; the file path identifies the source workflow.
+  if (!isRecord(event.workflow_run)
+    || event.workflow_run.path !== '.github/workflows/weighted-approval-review-event.yml'
     || event.workflow_run.event !== 'pull_request_review' || event.workflow_run.conclusion !== 'success') {
     throw new Error('event has no successful weighted approval review workflow run')
   }

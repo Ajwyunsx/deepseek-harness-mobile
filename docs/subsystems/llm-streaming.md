@@ -249,7 +249,7 @@ interface LlmFailure {
 
 ## Request-image pricing
 
-An adapter whose provider charges visual tokens for request images declares per-route pricing by overriding `LlmAdapter.imageRequestPricing`, and `ctx.llm.imageRequestPricing(provider, model)` resolves it synchronously for consumers. The token meter resolves the routed model's pricing on every measurement so compaction pressure, retention, and range selection price image history as the routed request actually sends it; the DeepSeek adapter reproduces its own request projection (per-model pixel budget, oldest-first offload) and prices retained images with the published v4 vision accounting, while provider usage remains the authoritative anchor for completed requests.
+An adapter whose provider charges visual tokens for request images declares per-route pricing by overriding `LlmAdapter.imageRequestPricing`, and `ctx.llm.imageRequestPricing(provider, model)` resolves it synchronously for consumers. The token meter resolves the routed model's pricing on every measurement so compaction pressure, retention, and range selection price image history as the routed request actually sends it; the DeepSeek adapter reproduces its own request projection (per-model pixel budget, oldest-first offload) and prices retained images with the published vision accounting, while provider usage remains the authoritative anchor for completed requests.
 
 ```ts type-equiv
 /**

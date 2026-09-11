@@ -14,6 +14,8 @@ The [ACP coverage run](https://github.com/deepseek-harness/deepseek-harness/acti
 
 A [worker-runtime coverage failure](https://github.com/deepseek-harness/deepseek-harness/actions/runs/34248221544/job/102135631932) exhausts the slow-binding fixture's one-second compute allowance. Concurrent native Windows reproductions exceed that allowance before calling the binding. Worker initialization contributes measured active time; the delayed binding contributes idle time.
 
+The [Windows coverage run](https://github.com/deepseek-harness/deepseek-harness/actions/runs/34324325375/job/102377982193) reports an SDK subprocess exit beyond a fixture's 200 ms confirmation window and an Inspector Worker startup beyond its ten-second default. Neither the protocol-error routing case nor the Cordis tree projection case measures those latency guarantees.
+
 ## Decision
 
 The [webhook browser test](../../../../apps/web/tests/github-ready-review.e2e.ts) observes the model request caused by delivery before checking Session registration. The [feedback test](../../../../apps/web/tests/feedback-command.e2e.ts) waits for the empty composer and enabled attachment control before comparing ARIA output. Matching consecutive snapshots cannot prove that the command RPC has settled: its event stream can publish the acknowledgement first.
@@ -27,6 +29,8 @@ The [ACP disconnect tests](../../../../packages/acp/acp/tests/dispose.spec.ts) a
 The [subagent teardown decision](2026-09-07-subagent-teardown-test-budgets.md) owns lifecycle cleanup budgets. The [persistent PowerShell decision](2026-09-07-pwsh-ci-observable-completion.md) owns exact versus inferred terminal readiness; a one-shot process's completion promise has different semantics.
 
 The [worker-runtime binding test](../../../../packages/code-runtime/code-runtime-worker-thread/tests/runtime.spec.ts) allows five seconds of compute for source-worker initialization and delays the binding for 6.5 seconds. Charging that idle delay would still exceed the entire compute allowance. The case retains its 15-second test limit and 30-second wall ceiling, registers Context and reply-timer cleanup, and leaves the hot-loop, decoy-dispatch, wall-ceiling, and abort controls at their existing limits. Production budgets remain unchanged.
+
+The [SDK subagent protocol-error test](../../../../packages/subagent/subagent-dsh-sdk/tests/subagent-dsh-sdk.spec.ts) uses the provider's normal shutdown and exit grace periods and registers disposal before its assertions. The [Inspector tree tests](../../../../packages/experimental/inspector/tests/cordis-tree.host.spec.ts) pass the active test budget to Worker startup and register cleanup while startup is still pending. A cancelled test cannot receive a late-ready handle; cleanup awaits initialization and closes a successfully started Worker. Failed initialization already terminates the Worker before rejecting. A controlled late-start test verifies cancellation and closure through the real Worker's HTTP endpoint. Production defaults remain unchanged.
 
 ## Alternatives considered
 

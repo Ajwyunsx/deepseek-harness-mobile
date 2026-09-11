@@ -230,12 +230,10 @@ export function presentedForClosing(owner: TurnTailOwnerProps): PresentedPath[] 
 export { basename } from '../presented.ts'
 
 /**
- * File-mention vocabulary over one turn's produced paths, for the closing
- * message's prose: an inline-code token opens the file it names. A token
- * resolves by exact path, or by being exactly the basename of exactly one
- * produced path — a basename two paths share stays inert rather than
- * guessing, so a mention link can never open the wrong file or 404.
- * @param paths - The turn's produced paths (tool order, already deduped).
+ * Resolves inline-code references against one turn's produced or delivered
+ * paths. Exact paths resolve directly; a basename resolves only when exactly
+ * one supplied path has that basename. Ambiguous and unknown tokens stay inert.
+ * @param paths - The turn's produced or delivered paths, already deduplicated.
  * @param openFile - The chat view's file opener.
  * @param label - Localizes the accessible open-label for a resolved path.
  * @returns The resolver MarkdownText consumes; the full path rides `title`,
@@ -255,7 +253,7 @@ export function producedFileMentions(
   }
 }
 
-/** The single produced path whose basename is exactly `value`, else undefined. */
+/** The single supplied path whose basename is exactly `value`, else undefined. */
 function onlyPathWithBasename(paths: readonly string[], value: string): string | undefined {
   const matches = paths.filter(path => basename(path) === value)
   return matches.length === 1 ? matches[0] : undefined

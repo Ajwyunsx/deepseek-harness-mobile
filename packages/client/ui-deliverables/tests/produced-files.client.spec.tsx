@@ -547,13 +547,23 @@ describe('plugin registration', () => {
     )
     const service = (ctx as unknown as { get(name: string): ChatFileMentions | undefined }).get('chatFileMentions')
     const mentions = service?.forClosing(owner, SessionId('viewed-session'))
+    expect(mentions?.resolve('report.html')?.label).toBe('Open site/report.html in sidebar')
     mentions?.resolve('report.html')?.open()
     expect(opened).toEqual(['site/report.html'])
     const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', fetcher)
-    const delivered = tailOwner({ produced: [], presented: [{ path: 'report.docx', seq: 2, index: 0 }] }, 3)
-    service?.forClosing(delivered, SessionId('child-session'))?.resolve('report.docx')?.open()
-    expect(fetcher).toHaveBeenCalledWith('/api/present.open?sessionId=child-session&seq=2&index=0', { method: 'POST', signal: expect.any(AbortSignal) as AbortSignal })
+    const preview = vi.fn<(path: string) => void>()
+    for (const produced of [[], [{ path: 'out/report.docx', seq: 1 }]]) {
+      const delivered = tailOwner({ produced, presented: [{ path: 'out/report.docx', seq: 2, index: 0 }] }, 3, preview)
+      const mentions = service?.forClosing(delivered, SessionId('child-session'))
+      for (const text of ['report.docx', 'out/report.docx']) {
+        const mention = mentions?.resolve(text)
+        expect(mention?.label).toBe('Open out/report.docx in sidebar')
+        mention?.open()
+      }
+    }
+    expect(preview.mock.calls).toEqual(Array.from({ length: 4 }, () => ['out/report.docx']))
+    expect(fetcher).not.toHaveBeenCalled()
     const face = entry!.inject!(SessionId('child-session') as never) as unknown as DeliverablesInjected
     fetcher.mockResolvedValueOnce(Response.json({ name: 'desktop', available: true, fileManager: 'finder' }))
     await face.reloadPresentedHost()
@@ -663,7 +673,16 @@ it('shows descriptions and falls back to file metadata without hiding extensionl
   expect(view.getByText('report.txt')).toBeTruthy()
 })
 
-it('distinguishes PDF, Word, Markdown, and code files with full-size decorative card icons', () => {
+it('marks delivery cards that directly follow the produced-files row', () => {
+  const shared = { ...openProps(), openFile: () => {}, sessionId: SessionId('session'), t: makeTranslate(en) }
+  const presented = [{ path: 'report.txt', seq: 2, index: 0 }]
+  const view = render(<Deliverables {...shared} matched={{ produced: ['source.ts'], presented }} />)
+  expect(view.getByText('Files changed')).toBeTruthy()
+  expect(view.container.querySelector('[data-presented-files-row]')?.parentElement
+    ?.getAttribute('data-after-produced-files')).toBe('true')
+})
+
+it('distinguishes PDF, Word, Markdown, and code files with compact decorative card icons', () => {
   const paths = ['report.pdf', 'report.docx', 'README.md', 'index.tsx']
   const view = render(<Deliverables {...openProps()} matched={{ produced: [], presented:
     paths.map((path, index) => ({ path, seq: 2, index })),
@@ -671,7 +690,7 @@ it('distinguishes PDF, Word, Markdown, and code files with full-size decorative 
   const icons = [...view.container.querySelectorAll('[data-presented-file]')].map((card) => {
     const icon = card.querySelector('svg')!
     expect(icon.getAttribute('aria-hidden')).toBe('true')
-    expect(icon.getAttribute('width')).toBe('28')
+    expect(icon.getAttribute('width')).toBe('20')
     return icon.innerHTML
   })
   expect(new Set(icons).size).toBe(paths.length)

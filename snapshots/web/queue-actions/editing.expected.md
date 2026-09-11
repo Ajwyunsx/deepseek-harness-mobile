@@ -41,9 +41,7 @@
     - button "Cancel editing":
       - img
 - textbox "Cmd/Ctrl+Enter steers all queued messages"
-- button "Commands":
-  - img
-- button "Add attachment":
+- button "Add files or run commands":
   - img
 - 'button "Access mode, current: Workspace Write"': Workspace Write
 - button "Select model, current DeepSeek-V4-Flash":

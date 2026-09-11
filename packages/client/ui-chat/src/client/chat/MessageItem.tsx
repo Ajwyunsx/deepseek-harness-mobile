@@ -156,7 +156,7 @@ function TurnMaxTokensItem({ t }: {
 /** Right-aligned bubble shared by user and steering rows. */
 function UserStyleBubble({
   content, renderMessageImages, actions, pending = false, echo = false, referenceLabels = [], skillNames = [],
-  previewAttachments, t,
+  previewAttachments, references, t,
 }: {
   content: readonly unknown[]
   renderMessageImages: ChatNodeOwnerProps['renderMessageImages']
@@ -172,6 +172,7 @@ function UserStyleBubble({
   skillNames?: readonly string[]
   /** Local submission-echo attachments replacing the content-derived attachment sequence. */
   previewAttachments?: readonly PresentedAttachment[]
+  references?: Pick<ChatNodeOwnerProps, 'openFile' | 'openSkill'>
   t: ChatViewSlotProps['t']
 }): ReactNode {
   const { text, attachments: contentAttachments, rest } = contentParts(content)
@@ -213,7 +214,7 @@ function UserStyleBubble({
           </div>
         )}
         {showBubble && <div className={css.bubble}>
-          {projectUserText(text, referenceLabels, skillNames)}
+          {projectUserText(text, referenceLabels, skillNames, 'skill', references)}
           {rest.map((block, i) => <JsonBlock key={i} label={t('message.extraBlock')} payload={block} truncatedLabel={truncated} />)}
         </div>}
         {referenceLabels.length > 0 && (
@@ -312,12 +313,13 @@ export function PendingSubmissionBubble({ submission, renderMessageImages, t }: 
 
 /** User and admitted-steering keyed Chat renderer. */
 export const UserMessageNodeView = memo(function UserMessageNodeView({
-  node, renderMessageImages, t,
+  node, renderMessageImages, openFile, openSkill, t,
 }: ChatNodeViewProps<'user' | 'steering'>) {
   const data = node.data
   return (
     <UserStyleBubble
       content={data.content}
+      references={{ openFile, openSkill }}
       renderMessageImages={renderMessageImages}
       {...data.referenceLabels === undefined ? {} : { referenceLabels: data.referenceLabels }}
       {...data.skillNames === undefined ? {} : { skillNames: data.skillNames }}

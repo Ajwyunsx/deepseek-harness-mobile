@@ -75,11 +75,15 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
     await dialog.waitFor({ timeout: 10_000 })
     await dialog.getByRole('button', { name: 'Agent 预设' }).click()
     await dialog.getByRole('heading', { name: 'Agent 预设' }).waitFor({ timeout: 10_000 })
-    await dialog.getByText('标准模式').first().waitFor({ timeout: 10_000 })
+    // The intro copy also names 标准模式. Wait for the roster's own action so
+    // the snapshot cannot land between the section shell and its cards.
+    await dialog.getByRole('button', { name: '查看: 标准模式', exact: true }).waitFor({ timeout: 10_000 })
 
     const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
 
     await compareOrRefreshGolden(SECTION_EXPECTED, snapshot, MODE)
+    const toggle = dialog.getByRole('switch', { name: '允许切换agent模式' })
+    expect(await toggle.getAttribute('aria-checked')).toBe('true')
     // The intro states the copy path directly, and the shipped rows offer
     // view/copy but never delete or a location — their
     // install is overwritten by upgrades and is not the user's to manage.
@@ -88,6 +92,8 @@ describe('web e2e: agent-preset authoring is a host-side copy', () => {
     expect(snapshot).toContain('查看: 标准模式')
     expect(snapshot).not.toContain('删除: 标准模式')
     expect(snapshot).not.toContain('打开目录')
+    // The rest of this scenario exercises the existing default and Creator
+    // actions with the beta picker enabled by default.
   }, 60_000)
 
   it('views a shipped composition read-only instead of editing it', async () => {

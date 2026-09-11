@@ -14,6 +14,8 @@ Status: implemented
 
 一次 [worker runtime coverage 失败](https://github.com/deepseek-harness/deepseek-harness/actions/runs/34248221544/job/102135631932)耗尽了慢 binding 夹具的一秒计算额度。原生 Windows 并发复现在调用 binding 前已超过该额度。Worker 初始化会累计所测的活跃时间；延迟的 binding 累计空闲时间。
 
+[Windows 覆盖率运行](https://github.com/deepseek-harness/deepseek-harness/actions/runs/34324325375/job/102377982193)报告了 SDK 子进程退出超过测试设置的 200 毫秒确认期限，以及 Inspector Worker 启动超过十秒默认期限。协议错误转发用例和 Cordis 树投影用例都不衡量这些延迟保证。
+
 ## 决策
 
 [Webhook 浏览器测试](../../../../apps/web/tests/github-ready-review.e2e.ts)观察投递触发的模型请求后再检查 Session 注册。[反馈测试](../../../../apps/web/tests/feedback-command.e2e.ts)在比较 ARIA 输出前等待输入框清空且附件按钮启用。连续两次快照相同不能证明命令 RPC 已完成：事件流可能先发布确认消息。
@@ -27,6 +29,8 @@ Status: implemented
 [子 Agent 拆卸决策](2026-09-07-subagent-teardown-test-budgets.zh.md)负责生命周期清理预算。[持久 PowerShell 决策](2026-09-07-pwsh-ci-observable-completion.zh.md)负责精确与推断的终端就绪状态；一次性进程的完成 Promise 具有不同语义。
 
 [Worker runtime binding 测试](../../../../packages/code-runtime/code-runtime-worker-thread/tests/runtime.spec.ts)为源码 worker 初始化保留五秒计算额度，并将 binding 延迟设为 6.5 秒。若将该空闲延迟计费，仍会超过整个计算额度。用例保留 15 秒测试期限与 30 秒墙钟上限，登记 Context 和回复定时器的清理，并保持热循环、诱饵 dispatch、墙钟上限及取消控制用例的原有限制。生产预算不变。
+
+[SDK 子 Agent 协议错误测试](../../../../packages/subagent/subagent-dsh-sdk/tests/subagent-dsh-sdk.spec.ts)使用提供方正常的关闭和退出等待时间，并在断言前登记清理。[Inspector 树测试](../../../../packages/experimental/inspector/tests/cordis-tree.host.spec.ts)将当前测试预算传给 Worker 启动，并在启动尚未完成时登记清理。取消后的测试不会收到随后才就绪的实例；清理等待初始化完成，并关闭成功启动的 Worker。初始化失败时，启动操作会在拒绝前终止 Worker。受控的延迟启动测试通过真实 Worker 的 HTTP 端点验证取消和关闭。生产默认值不变。
 
 ## 考虑过的替代方案
 

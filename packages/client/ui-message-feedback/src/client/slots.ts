@@ -16,7 +16,7 @@ import type { MessageId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { MessageFeedbackItem, MessageFeedbackRating } from '@deepseek-ai/dsh-message-feedback/types'
 // Type-only: pulls this package's LocaleNamespaceMap merge (the 'feedback' seat).
 import type {} from './locales.ts'
-import type { MessageFeedbackActionResult, MessageFeedbackToggleResult, MessageFeedbackView } from './controller.ts'
+import type { MessageFeedbackActionResult, MessageFeedbackView } from './controller.ts'
 import type { FeedbackDialogState } from './dialog.ts'
 
 /** Injected business face of one assistant-message feedback entry. */
@@ -33,21 +33,19 @@ export interface MessageFeedbackInjected {
    */
   current: (messageId: MessageId) => MessageFeedbackItem | undefined
   /**
-   * Apply the requested judgment, retracting instead when the committed rating
-   * already matches. The controller decides from the committed item, so a click
-   * before the first list read still toggles the stored value.
+   * Retract the requested judgment only while the committed rating still
+   * matches; a concurrent change makes the serialized operation a no-op.
    * @param messageId - target assistant message.
-   * @param rating - the judgment the human asked for.
+   * @param rating - judgment the human asked to retract.
    */
-  toggle: (messageId: MessageId, rating: MessageFeedbackRating) => Promise<MessageFeedbackToggleResult>
+  retract: (messageId: MessageId, rating: MessageFeedbackRating) => Promise<MessageFeedbackActionResult>
   /**
-   * Open the Session's feedback dialog for one message; its submission
-   * records a negative judgment with the dialog's category and text.
+   * Open the Session's feedback dialog for one message and judgment; its
+   * submission records that rating with the dialog's category and text.
    * @param messageId - target assistant message.
+   * @param rating - judgment to record on submission.
    */
-  openDialog: (messageId: MessageId) => void
-  /** Show the Session's acknowledgement toast. */
-  acknowledge: () => void
+  openDialog: (messageId: MessageId, rating: MessageFeedbackRating) => void
 }
 
 /** Full props of one assistant-message feedback entry. */
@@ -71,6 +69,8 @@ export interface FeedbackDialogInjected {
   submit: () => Promise<void>
   /** Close the dialog and discard the draft. */
   dismiss: () => void
+  /** Retire the current submission-failure toast without closing its draft. */
+  dismissFailure: () => void
   /**
    * Retire the toast the view finished showing.
    * @param seq - the toast sequence.

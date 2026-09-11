@@ -78,7 +78,8 @@ test('resolves a review workflow run to the current pull request and rejects sta
   const workflowRunEvent = {
     repository: { full_name: 'deepseek-harness/deepseek-harness' },
     workflow_run: {
-      name: 'weighted-approval-review-event',
+      name: 'weighted-approval-review-event:42',
+      path: '.github/workflows/weighted-approval-review-event.yml',
       event: 'pull_request_review',
       conclusion: 'success',
       head_sha: HEAD_SHA,
@@ -94,6 +95,21 @@ test('resolves a review workflow run to the current pull request and rejects sta
     },
   })
   assert.equal(current.pull_request.number, 42)
+
+  for (const invalidRun of [
+    { path: '.github/workflows/other.yml' },
+    { path: undefined },
+    { event: 'push' },
+    { conclusion: 'failure' },
+  ]) {
+    await assert.rejects(approvalEventFromWorkflowRun({
+      event: {
+        ...workflowRunEvent,
+        workflow_run: { ...workflowRunEvent.workflow_run, ...invalidRun },
+      },
+      api: async () => { throw new Error('invalid source must not call GitHub') },
+    }), /successful weighted approval review workflow run/u)
+  }
 
   assert.equal(await approvalEventFromWorkflowRun({
     event: workflowRunEvent,

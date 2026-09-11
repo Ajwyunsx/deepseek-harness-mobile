@@ -195,6 +195,14 @@
   color: var(--dsw-alias-label-caption);
 }
 
+.input[data-composer-composing] p:last-child::after {
+  content: none;
+}
+
+.input[data-composer-composing] + .placeholder {
+  visibility: hidden;
+}
+
 /* figma 34:10434: #ADB2B8 light / #81858C dark — the caption pair exactly.
    Insets mirror .input's pads (the other right 4px sits on .scroll). One
    ellipsized line: a wrapped second line would clip against the docked

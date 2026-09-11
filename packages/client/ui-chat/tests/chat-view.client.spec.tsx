@@ -24,12 +24,13 @@ import type { KeyedSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import { EMPTY_CONVERSATION_SNAPSHOT } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { createChatStore } from '../src/client/stores.ts'
 import { ChatView } from '../src/client/chat/ChatView.tsx'
 import { ChatNodeSeat } from '../src/client/chat/ChatNodeSeat.tsx'
 import { useTurnDataValue } from '../src/client/chat/use-turn-data.ts'
-import { zh } from '../src/client/locale.ts'
+import { en, zh } from '../src/client/locale.ts'
 import { AssistantNodeView } from '../src/client/chat/AssistantNodeView.tsx'
 import { CommandNodeView, ManualCompactionNodeView } from '../src/client/chat/CommandNodeView.tsx'
 import {
@@ -250,6 +251,7 @@ function makeHarness(
     key => chatSource.source.getSnapshot().nodes.processSource(key),
   )
   const openFile = vi.fn<(path: string) => Promise<void>>().mockResolvedValue(undefined)
+  const openSkill = vi.fn<(name: string) => void>()
   const loadOlder = vi.fn()
   const loadThrough = vi.fn<(seq: number) => Promise<void>>().mockResolvedValue(undefined)
   // Mutable outline holder: tests swap the value and drive a re-render via set().
@@ -396,6 +398,7 @@ function makeHarness(
     openView,
     completeViewRequest: () => {},
     openFile,
+    openSkill,
     loadOlder,
     loadThrough,
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
@@ -425,7 +428,7 @@ function makeHarness(
   }
   return {
     set, setSession: session.set, setChat: chatSource.set, ChatView, props,
-    openFile, loadOlder, loadThrough, openView,
+    openFile, openSkill, loadOlder, loadThrough, openView,
     setOutline: (value: unknown) => { outlineValue = value },
     chatScroll, forkAt, toolOwners,
     setTranscriptView: (mode: TranscriptViewMode) => { transcriptView.set(mode) },
@@ -537,6 +540,16 @@ describe('Chat node rendering', () => {
     expect(formatRunDuration(-500, t)).toBe('0秒')
     expect(formatRunDuration(15_999, t)).toBe('15秒')
     expect(formatRunDuration(125_000, t)).toBe('2分05秒')
+    // The hour rolls at exactly 3600s, never at 60 displayed minutes.
+    expect(formatRunDuration(3_599_999, t)).toBe('59分59秒')
+    expect(formatRunDuration(3_600_000, t)).toBe('1小时00分00秒')
+    expect(formatRunDuration(3_903_000, t)).toBe('1小时05分03秒')
+    expect(formatRunDuration(7_261_000, t)).toBe('2小时01分01秒')
+  })
+
+  it('formatRunDuration uses the English hour template', () => {
+    const t = makeTranslate(en, commonEn)
+    expect(formatRunDuration(3_903_000, t)).toBe('1h 05m 03s')
   })
 
 })
@@ -1838,6 +1851,22 @@ describe('ChatView', () => {
     expect(view.container.querySelector('[data-turn-tail="1"]')?.textContent).toContain('用时 19秒')
   })
 
+  it('the actions-owning assistant footer shows an hour-scale run time', () => {
+    const h = makeHarness({
+      nodes: [
+        user(1, 'hi'),
+        assistant(2, 'mid-turn text', 1, 1),
+        assistant(16, 'final answer', 1, 2),
+        toolResult(18, 'trailing'),
+      ],
+      turnTimings: new Map([[1, { startTime: 1_000, endTime: 3_904_000 }]]),
+      turnEnds: new Map([[1, 20]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.container.querySelector('[data-turn-tail="1"]')?.textContent)
+      .toContain('用时 1小时05分03秒')
+  })
+
   it('the settled footer exposes ttft, decode throughput, and usage as the details trigger', () => {
     const first: AssistantMessageNode = {
       kind: 'assistant', seq: 2, time: 2_000, turn: 1, step: 1, blocks: [{ kind: 'text', text: 'mid' }],
@@ -2162,6 +2191,17 @@ describe('ChatView', () => {
       }] })
     })
     expect(status.textContent).toMatch(/^深度求索中\.\.\.2分0\d秒$/)
+  })
+
+  it('the running clock reads hours once the turn passes an hour', () => {
+    const startTime = Date.now() - 3_903_000
+    const trigger: UserMessageNode = { ...user(1, 'go'), time: startTime + 1 }
+    const h = makeHarness(
+      { nodes: [trigger], turnTimings: new Map([[1, { startTime }]]) },
+      { running: true },
+    )
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.getByRole('status').textContent).toMatch(/^深度求索中\.\.\.1小时05分0\d秒$/)
   })
 
   it('hands each ordered root call to the keyed business-node slot', () => {

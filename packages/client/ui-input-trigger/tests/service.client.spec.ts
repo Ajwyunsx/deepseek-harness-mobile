@@ -63,7 +63,7 @@ function readySource(
 }
 
 const claimOf = (token: string): CommandClaim =>
-  ({ token, submit: () => Promise.resolve({ kind: 'success' }) })
+  ({ name: token.slice(1).trim(), token, submit: () => Promise.resolve({ kind: 'success' }) })
 
 /** One microtask hop: lets settled candidate promises flow into the store. */
 const tick = () => Promise.resolve()
@@ -1161,5 +1161,28 @@ describe('adjudicate', () => {
     abort.abort(new Error('attempt released'))
     await expect(controller.adjudicate('/goal', abort.signal, { attachments: 0 })).rejects.toThrow('attempt released')
     expect(hook).not.toHaveBeenCalled()
+  })
+})
+
+describe('reference activation', () => {
+  it('routes chips by owner and text by the live lexicon without picking or serializing', () => {
+    const openReference = vi.fn(() => true)
+    const lexicon = vi.fn(() => ['review'])
+    const skill = deferredSource('/', 'skill', { lexicon, openReference }).source
+    const inert = deferredSource('/', 'inert', { lexicon }).source
+    const { controller, sources } = controllerBench([inert, skill])
+    expect(controller.openReference(undefined, { ref: '/unknown' })).toBe(false)
+    expect(controller.openReference('missing', { ref: '/review' })).toBe(false)
+    expect(controller.openReference(undefined, { ref: '/review' })).toBe(true)
+    expect(openReference).toHaveBeenCalledWith({ sessionId: sid('a') }, { ref: '/review' })
+    expect(controller.openReference('skill', { ref: 'opaque', appearance: 'file' })).toBe(true)
+    lexicon.mockReturnValue([])
+    expect(controller.openReference(undefined, { ref: '/review' })).toBe(false)
+    openReference.mockReturnValue(false)
+    expect(controller.openReference('skill', { ref: 'opaque' })).toBe(false)
+    sources.splice(0)
+    expect(controller.openReference('skill', { ref: '/review' })).toBe(false)
+    controller.dispose()
+    expect(controller.openReference('skill', { ref: '/review' })).toBe(false)
   })
 })

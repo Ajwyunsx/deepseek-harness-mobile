@@ -23,7 +23,7 @@ VFS 镜像打包器：把一份合成 profile 变成浏览器 worker 挂载为�
 <a id="use-this-package"></a>
 ## 使用本包
 
-[`DshConfigTreeDeclaration`](../../util/package-manifest/README.zh.md) 描述每个 `dsh.configTrees` 条目；本打包器负责校验并解析其源目录。
+打包器在 [`src/repository.ts`](src/repository.ts) 中拥有内部 `dsh.configTrees` 声明、校验和源目录解析。该字段不属于公共插件 manifest API。
 
 打包是三层标准栈：
 

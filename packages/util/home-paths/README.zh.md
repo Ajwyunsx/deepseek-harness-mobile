@@ -29,13 +29,16 @@ kind: "package-library"
 ### 解析主目录
 
 ```ts
-import { resolveDshHome, dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { resolveDshHome, dshHomePath, dshCachePath } from '@deepseek-ai/dsh-home-paths'
 
 const home = resolveDshHome()                // configured path, else $DSH_HOME, else ~/.dsh
 const settings = dshHomePath('settings')     // join one child onto the resolved home
+const cache = dshCachePath('models')         // $DSH_HOME/cache/models, default ~/.dsh/cache/models
 ```
 
 显式配置的路径优先级最高，然后是 `$DSH_HOME`，最后是默认的 `~/.dsh`。空或仅含空白的 `$DSH_HOME` 视为未设置，因此空白的覆盖值绝不会把主目录解析到当前工作目录。
+
+`dshCachePath(...segments)` 从解析出的主目录下的 `cache` 目录派生路径。不传路径段时返回缓存目录本身。传入首个选项对象 `dshCachePath({ dshHome: home }, ...segments)` 可使用显式配置的主目录，遵循相同的优先级与波浪号展开规则。它返回绝对路径，不会创建目录。
 
 ### 展示主目录
 

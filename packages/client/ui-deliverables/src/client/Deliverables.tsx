@@ -58,7 +58,10 @@ export function Deliverables({ matched, openFile, t, sessionId, useSessions, ope
   }, [matched.presented.length, host, reloadPresentedHost])
   return <>
     {matched.produced.length > 0 && <ProducedFiles matched={matched.produced} openFile={openFile} t={t} />}
-    {matched.presented.length > 0 && <div className={css.root}>
+    {matched.presented.length > 0 && <div
+      className={css.root}
+      data-after-produced-files={matched.produced.length > 0 || undefined}
+    >
       {host === 'error' && <div className={css.hostStatus}>
         <span>{t('presented.hostError')}</span>
         <Button size="sm" onClick={() => { void reloadPresentedHost() }}>{t('presented.retry')}</Button>

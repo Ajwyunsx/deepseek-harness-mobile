@@ -1412,17 +1412,27 @@ describe('dsh-subagent-acp', () => {
       args: [mockServer],
       permission: 'reject',
       env: { MOCK_TRAP_SIGTERM: '1', MOCK_TEXT: 'x', MOCK_READY_FILE: ready },
-      disposeEofGraceMs: 150,
-      disposeGraceMs: 150,
+      // The graces are wall-clock budgets for the managed scope's teardown on a
+      // shared host. At 150ms the hosted image escalated while the scope could
+      // not take the signal and systemctl failed the kill ("Failed to send
+      // signal SIGKILL to auxiliary processes: Invalid argument"), surfacing as
+      // a teardown failure the configuration never asked for. The case asserts
+      // that config graces reach the real run, so the value only has to clear
+      // the host's scope handling.
+      disposeEofGraceMs: 5_000,
+      disposeGraceMs: 5_000,
     })
     const run = await ctx.subagents.start('acp', request())
     expect(start).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.objectContaining({
-      disposeEofGraceMs: 150,
-      disposeGraceMs: 150,
+      disposeEofGraceMs: 5_000,
+      disposeGraceMs: 5_000,
     }))
     await waitForFile(ready, task.timeout)
     await expect(run.dispose()).resolves.toBeUndefined()
-  })
+    // The trapped child refuses stdin EOF, so the ladder waits out the EOF
+    // grace and then the SIGTERM grace (10s) before the SIGKILL settles it.
+    // That fixed cost is above the 5000ms default the local unit entry grants.
+  }, 30_000)
 
   it('rejects a dispose grace outside the Node timer range at load', async () => {
     for (const bad of [

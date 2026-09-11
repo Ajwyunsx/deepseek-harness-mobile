@@ -29,7 +29,7 @@ Compose this service when an interactive UI should let users drive agent-side be
 
 ### Registering a command
 
-A plugin registers a command with `ctx.commands.register()`: a lowercase name, a description shown in discovery, an optional `input` hint, and a handler that runs against the receiving agent.
+A plugin registers a command with `ctx.commands.register()`: a lowercase name, a discovery description, an optional `input` hint, and a handler. An optional branded `definitionId` gives the definition a stable, plugin-namespaced identity for adapters; it is independent of display copy and execution `commandId`. The effective descriptor carries only the selected definition's identity, so a scoped override never inherits the shadowed registration's identity.
 
 ```text
 ctx.commands.register({
@@ -81,7 +81,7 @@ The observable behavior is covered in [Use this package](#use-this-package); thi
 |---|---|
 | [`src/index.ts`](src/index.ts) | `CommandRuntime` service: registration, scoping, dispatch, lifecycle events |
 | [`src/types.ts`](src/types.ts) | Command definition, descriptor, execution, and result types |
-| [`src/brand.ts`](src/brand.ts) | `CommandId` brand for lifecycle pairing ids |
+| [`src/brand.ts`](src/brand.ts) | Stable command-definition identities and per-execution lifecycle ids |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion pairing `command/run` with `command/done` per session log |
 
 ### Lifecycle events

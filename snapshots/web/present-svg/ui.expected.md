@@ -33,7 +33,7 @@
 - paragraph:
   - text: 已创建
   - code:
-    - button "在默认程序中打开 von-neumann.svg": von-neumann.svg
+    - button "在侧边栏打开 von-neumann.svg": von-neumann.svg
   - text: ，一个简洁的冯诺依曼架构示意图，包含：
 - list:
   - listitem:

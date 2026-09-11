@@ -620,7 +620,7 @@ describe('/plan', () => {
     const plainSteer = vi.fn()
     ;(plainAgent as unknown as { steer: typeof plainSteer }).steer = plainSteer
     expect(ctx.commands.list(plainAgent)).toEqual([
-      { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
+      { definitionId: '@deepseek-ai/dsh-plan-mode', name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
     ])
 
     const signal = new AbortController().signal

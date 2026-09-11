@@ -14,8 +14,10 @@ kind: "package-reference"
 
 ## 目录
 
+- [引用预览](#reference-previews)
 - [系统提示词行](#system-prompt-row)
 - [轮次 token 用量](#turn-token-usage)
+- [已完成轮次的页脚](#completed-turn-footer)
 - [轮次过程折叠](#turn-process-folding)
 - [滚动归属](#scroll-ownership)
 - [模型体验](#model-experience)
@@ -23,6 +25,11 @@ kind: "package-reference"
 - [开发备注](#dev-note)
 
 -----
+
+<a id="reference-previews"></a>
+## 引用预览
+
+已发送的文件引用及消息日志确认调用的 skill 可在右侧栏打开预览。文件路径使用当前查看的 Session；skill 名称由该 Session 当前的输入触发源解析。两者悬停或聚焦时均使用正文文件链接的虚线下划线。会话、目录和命令标签仍只作为引用展示。
 
 <a id="system-prompt-row"></a>
 ## 系统提示词行
@@ -35,6 +42,11 @@ kind: "package-reference"
 ## 轮次 token 用量
 
 只有当已加载窗口包含 `turn/start`，且每次已启动的模型尝试都报告安全、精确的用量时，已完成轮次才显示可展开的用量行。该行会省略不可用的可选用量桶。记账不完整或相互矛盾时，整个详情都不显示，避免把部分总量冒充完整结果。
+
+<a id="completed-turn-footer"></a>
+## 已完成轮次的页脚
+
+已完成轮次的操作页脚位于前方正文或扩展内容下方 20px。
 
 -----
 

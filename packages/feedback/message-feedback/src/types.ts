@@ -24,7 +24,7 @@ export interface MessageFeedbackItem {
   readonly rating: MessageFeedbackRating
   /** Optional explanation, preserved verbatim after validation. */
   readonly note?: string
-  /** Category the human filed a negative judgment under. */
+  /** Category the human filed the judgment under. */
   readonly category?: FeedbackCategory
   /** Equality-only token replaced by every material create or update. */
   readonly version: MessageFeedbackVersion

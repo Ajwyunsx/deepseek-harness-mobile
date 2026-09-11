@@ -45,6 +45,7 @@ export interface SystemPromptDecisionInput {
 
 /** Committed events from the newest backward; the restore scans stop at the first match. */
 function eventsNewestFirst(session: Session): readonly SessionEvent[] {
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   return session.snapshotEvents().toReversed()
 }
 
@@ -63,6 +64,7 @@ export class SystemPromptProjection {
   private systemNodes(): { seq: SessionSeq; text: string | undefined }[] {
     const nodes: { seq: SessionSeq; text: string | undefined }[] = []
     for (const seq of this.session.surface.nodes) {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = this.session.eventAt(seq)
       if (event?.type !== 'system/message') continue
       const content = event.data.message.content

@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 注册命令
 
-插件用 `ctx.commands.register()` 注册命令：小写名称、在发现界面中展示的描述、可选的 `input` 提示，以及针对接收 agent 运行的处理器。
+插件通过 `ctx.commands.register()` 注册命令，提供小写名称、发现界面中的说明、可选的 `input` 提示和处理器。可选的品牌类型字段 `definitionId` 为适配器提供带插件命名空间的稳定定义标识，它独立于显示文案和每次执行的 `commandId`。有效描述符只携带被选中定义的标识，作用域覆盖不会继承被遮蔽注册项的标识。
 
 ```text
 ctx.commands.register({
@@ -81,7 +81,7 @@ ctx.commands.register({
 |---|---|
 | [`src/index.ts`](src/index.ts) | `CommandRuntime` 服务：注册、作用域、分派、生命周期事件 |
 | [`src/types.ts`](src/types.ts) | 命令定义、描述符、执行与结果类型 |
-| [`src/brand.ts`](src/brand.ts) | 生命周期配对 id 的 `CommandId` brand |
+| [`src/brand.ts`](src/brand.ts) | 稳定命令定义标识和每次执行的生命周期 id |
 | [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件：按会话日志配对 `command/run` 与 `command/done` |
 
 ### 生命周期事件

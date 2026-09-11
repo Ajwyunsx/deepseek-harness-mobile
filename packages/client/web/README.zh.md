@@ -72,7 +72,9 @@ kind: "package-library"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 库入口：`AppWebEntry`、`getStaticModules`、平台表 |
-| [`src/boot.ts`](src/boot.ts) | `AppWebEntry`：两阶段启动、激活审计、渲染器交接 |
+| [`src/boot.ts`](src/boot.ts) | `AppWebEntry`：模块阶段、启动页、immediately 层级预取，随后调用 `bootClient` + `mountClient` |
+| [`src/boot-client.ts`](src/boot-client.ts) | `bootClient` / `assertEntriesActive`：挂载 Loader、每个 manifest 行一个 entry、激活审计 |
+| [`src/mount.ts`](src/mount.ts) | `mountClient`：经 `uiRenderer` 依赖 fiber 完成渲染器交接 |
 | [`src/boot-page.ts`](src/boot-page.ts) | 无框架启动页：spinner、逐 entry 状态、失败渲染 |
 | [`src/platform.ts`](src/platform.ts) | `PLATFORM_MODULES` / `PRELOADED_CLIENT_EXTERNALS`：隐式 external 基座 |
 | [`src/seed.ts`](src/seed.ts) | 启动时交给 loader 的静态模块表 |

@@ -126,24 +126,38 @@ describe('MessageFeedbackController', () => {
     expect(puts[1]).not.toHaveProperty('category')
   })
 
-  it('toggle retracts a matching rating, records an absent one, and reports the committed rating', async () => {
+  it('retract deletes a matching rating and ignores an opposite judgment', async () => {
     const { ctx, calls } = fakeRemote({
       list: () => Promise.resolve({ ok: true, value: { items: [item({ note: 'stored', category: 'other' })] } }),
-      put: () => Promise.resolve({ ok: true, value: item({ rating: 'negative', version: version('v2') }) }),
     })
     const controller = new MessageFeedbackController(ctx, SESSION)
 
-    expect(await controller.toggle(MSG, 'positive')).toEqual({ ok: true, rating: null })
-    expect(await controller.toggle(MSG, 'negative')).toEqual({ ok: true, rating: 'negative' })
+    expect(await controller.retract(MSG, 'negative')).toEqual({ ok: true })
+    expect(await controller.retract(MSG, 'positive')).toEqual({ ok: true })
 
+    expect(calls.filter(call => call.method === 'put')).toHaveLength(0)
     expect(calls.filter(call => call.method === 'delete')[0]?.request)
       .toEqual({ sessionId: SESSION, messageId: MSG, ifVersion: version('v1') })
-    // A replacement stores the bare judgment: the retracted item's note and
-    // category do not carry over.
-    const put = calls.filter(call => call.method === 'put')[0]?.request as Record<string, unknown>
-    expect(put).toMatchObject({ rating: 'negative', ifVersion: null })
-    expect(put).not.toHaveProperty('note')
-    expect(put).not.toHaveProperty('category')
+  })
+
+  it('never turns a queued stale retraction into a bare rating put', async () => {
+    const existing = item({ rating: 'positive', version: version('v1') })
+    const replacement = item({ rating: 'negative', version: version('v2') })
+    const { ctx, calls } = fakeRemote({
+      list: () => Promise.resolve({ ok: true, value: { items: [existing] } }),
+      put: () => Promise.resolve({ ok: true, value: replacement }),
+    })
+    const controller = new MessageFeedbackController(ctx, SESSION)
+    await controller.ensure()
+
+    const replaced = controller.rate(MSG, 'negative')
+    const staleRetraction = controller.retract(MSG, 'positive')
+
+    await expect(replaced).resolves.toEqual({ ok: true })
+    await expect(staleRetraction).resolves.toEqual({ ok: true })
+    expect(calls.filter(call => call.method === 'put')).toHaveLength(1)
+    expect(calls.filter(call => call.method === 'delete')).toHaveLength(0)
+    expect(controller.getSnapshot().items.get(MSG)).toEqual(replacement)
   })
 
   it('reconciles a version conflict from the authoritative item without refetching', async () => {
@@ -176,7 +190,7 @@ describe('MessageFeedbackController', () => {
     const controller = new MessageFeedbackController(ctx, SESSION)
     await controller.ensure()
 
-    expect(await controller.toggle(MSG, 'positive')).toMatchObject({ ok: false, error: { code: 'version-conflict' } })
+    expect(await controller.retract(MSG, 'positive')).toMatchObject({ ok: false, error: { code: 'version-conflict' } })
     expect(controller.getSnapshot().items.has(MSG)).toBe(false)
   })
 
@@ -187,7 +201,7 @@ describe('MessageFeedbackController', () => {
     const controller = new MessageFeedbackController(ctx, SESSION)
     await controller.ensure()
 
-    expect(await controller.toggle(MSG, 'positive')).toEqual({ ok: true, rating: null })
+    expect(await controller.retract(MSG, 'positive')).toEqual({ ok: true })
 
     expect(calls.filter(call => call.method === 'delete')[0]?.request)
       .toEqual({ sessionId: SESSION, messageId: MSG, ifVersion: version('v7') })
@@ -402,7 +416,7 @@ describe('MessageFeedbackController', () => {
     })
     const controller = new MessageFeedbackController(ctx, SESSION)
     await controller.ensure()
-    const pending = controller.toggle(MSG, 'positive')
+    const pending = controller.retract(MSG, 'positive')
 
     const listener = vi.fn()
     controller.subscribe(listener)
@@ -439,7 +453,7 @@ describe('MessageFeedbackController', () => {
     const controller = new MessageFeedbackController(ctx, SESSION)
     await controller.ensure()
 
-    expect(await controller.toggle(MSG, 'positive')).toMatchObject({
+    expect(await controller.retract(MSG, 'positive')).toMatchObject({
       ok: false,
       error: { code: 'session-not-found' },
     })
@@ -547,7 +561,7 @@ describe('MessageFeedbackController', () => {
     const controller = new MessageFeedbackController(ctx, SESSION)
     await controller.ensure()
 
-    expect(await controller.toggle(MSG, 'positive')).toMatchObject({ ok: false, error: { code: 'gateway/internal' } })
+    expect(await controller.retract(MSG, 'positive')).toMatchObject({ ok: false, error: { code: 'gateway/internal' } })
     expect(controller.getSnapshot().items.has(MSG)).toBe(true)
   })
 })

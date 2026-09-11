@@ -10,6 +10,7 @@ import type { MessageFeedbackActionResult } from '../src/client/controller.ts'
 import { FeedbackDialogController, type FeedbackSubmit } from '../src/client/dialog.ts'
 
 const MSG = 'm-1' as MessageId
+const MESSAGE_TARGET = { kind: 'message', messageId: MSG, rating: 'positive' } as const
 
 function bench(result: () => Promise<MessageFeedbackActionResult> = () => Promise.resolve({ ok: true })) {
   const submit = vi.fn<FeedbackSubmit>(() => result())
@@ -36,9 +37,9 @@ describe('FeedbackDialogController', () => {
     })
 
     controller.dismiss()
-    controller.open({ kind: 'message', messageId: MSG })
+    controller.open(MESSAGE_TARGET)
     expect(controller.state.getSnapshot()).toMatchObject({
-      target: { kind: 'message', messageId: MSG }, category: null, text: '',
+      target: MESSAGE_TARGET, category: null, text: '',
     })
   })
 
@@ -77,27 +78,37 @@ describe('FeedbackDialogController', () => {
 
   it('submits the message target with the entry', async () => {
     const { controller, submit } = bench()
-    controller.open({ kind: 'message', messageId: MSG })
+    controller.open(MESSAGE_TARGET)
     controller.edit({ category: 'task-result' })
     controller.edit({ text: 'wrong file' })
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith({ kind: 'message', messageId: MSG }, { text: 'wrong file', category: 'task-result' })
+    expect(submit).toHaveBeenCalledWith(MESSAGE_TARGET, { text: 'wrong file', category: 'task-result' })
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
   })
 
   it('keeps the draft open with the failure code when the submission is rejected', async () => {
     const { controller } = bench(() => Promise.resolve({ ok: false, error: { code: 'version-conflict', message: 'changed' } }))
-    controller.open({ kind: 'message', messageId: MSG })
+    controller.open(MESSAGE_TARGET)
     controller.edit({ text: 'draft' })
 
     await controller.submitDraft()
 
     expect(controller.state.getSnapshot()).toMatchObject({
-      target: { kind: 'message', messageId: MSG }, text: 'draft', submitting: false,
+      target: MESSAGE_TARGET, text: 'draft', submitting: false,
       failure: 'version-conflict', toast: 0,
     })
+  })
+
+  it('retires the failure toast without closing its draft', async () => {
+    const { controller } = bench(() => Promise.resolve({ ok: false, error: { code: 'version-conflict', message: 'changed' } }))
+    controller.open(MESSAGE_TARGET)
+    await controller.submitDraft()
+
+    controller.dismissFailure()
+    expect(controller.state.getSnapshot().failure).toBeNull()
+    expect(controller.state.getSnapshot().target).toEqual(MESSAGE_TARGET)
   })
 
   it('freezes the draft and refuses a second submit while one is in flight', async () => {
@@ -125,14 +136,14 @@ describe('FeedbackDialogController', () => {
     const { controller } = bench(() => gate)
     controller.open({ kind: 'session' })
     const pending = controller.submitDraft()
-    controller.open({ kind: 'message', messageId: MSG })
+    controller.open(MESSAGE_TARGET)
     controller.edit({ text: 'new draft' })
 
     release()
     await pending
 
     expect(controller.state.getSnapshot()).toMatchObject({
-      target: { kind: 'message', messageId: MSG }, text: 'new draft', toast: 1,
+      target: MESSAGE_TARGET, text: 'new draft', toast: 1,
     })
   })
 
@@ -152,11 +163,13 @@ describe('FeedbackDialogController', () => {
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, failure: null, submitting: false, toast: 0 })
   })
 
-  it('retires only the toast the view finished showing', () => {
+  it('retires only the toast the view finished showing', async () => {
     const { controller } = bench()
 
-    controller.acknowledge()
-    controller.acknowledge()
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
     expect(controller.state.getSnapshot().toast).toBe(2)
 
     controller.dismissToast(1)
@@ -165,9 +178,10 @@ describe('FeedbackDialogController', () => {
     expect(controller.state.getSnapshot().toast).toBe(0)
   })
 
-  it('keeps a toast on screen across a dismiss and drops everything on dispose', () => {
+  it('keeps a toast on screen across a dismiss and drops everything on dispose', async () => {
     const { controller } = bench()
-    controller.acknowledge()
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
     controller.open({ kind: 'session' })
 
     controller.dismiss()

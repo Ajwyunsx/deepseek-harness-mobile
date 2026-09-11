@@ -223,6 +223,8 @@ export interface SkillListRequest {
 
 /** One skill available to the Session's human-facing composer. */
 export interface SkillEntry {
+  /** Absolute SKILL.md path when supplied by a filesystem provider. */
+  readonly path?: string
   /** Kebab-case identifier referenced as `/name`. */
   readonly name: string
   /** Short routing description. */

@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-在 composer 中键入 `/` 命令会打开匹配的表面——已注册的弹窗、宿主命令的输入或直接执行——命令行绝不会被静默降级为普通提示词。业务包经 `ctx.commandUi` 贡献命令表面：popupSelect 贡献项（`/model`、`/permission`）或 action（`/feedback`），既可注册为命令，也可装饰既有宿主命令，宿主保留其目录行与参数声明。空格与回车对照会话目录解析命令行：带 `input` 的宿主描述符是 `leadingInput`，注册了 `CommandUiSpec` 的按其种类派发，其余全部是 `execute`。
+键入 `/` 命令会打开已注册的弹窗、运行客户端动作、进入宿主命令的输入或直接执行，命令行不会被静默降级为普通提示词。业务包通过 `ctx.commandUi` 注册 popupSelect（`/model`、`/permission`）或 action，也可用这两种方式装饰既有宿主命令，同时保留其目录行与参数声明。空格与回车根据会话目录解析命令行：带 `input` 的宿主描述符是 `leadingInput`，注册了 `CommandUiSpec` 的是 `popupSelect` 或 `action`，其余是 `execute`。
 
 ## 目录
 
@@ -25,11 +25,15 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-与 `ui-input-trigger` 及 `ui-conversation` 一起挂载本插件；`/` source 随即出现在触发菜单中，业务包经 `ctx.commandUi` 注册自己的命令表面。键入 `/model` 打开已注册的弹窗；带参数声明的宿主命令打开其输入或直接执行。
+与 `ui-input-trigger` 及 `ui-conversation` 一起挂载本插件；`/` source 随即出现在触发菜单中，业务包经 `ctx.commandUi` 注册自己的命令表面。键入 `/model` 打开已注册的弹窗；带参数声明的宿主命令打开其输入或直接执行。composer 的 `+` 按钮与键入的 `/` 打开同一个菜单：「添加」小节（文件、目标、计划、反馈）与「指令」小节（压缩、权限、模型、下载日志）按使用频次排列，每行带图标、本地化的标题与说明，本地化标题与命令名不同时还显示命令名作为别名。
 
 ### 种类与装饰
 
-贡献项是客户端自有命令——与宿主命令同名会明确报错。装饰为**已存在的**宿主命令添加裸调用弹窗：宿主命令保留其目录行、参数声明与生命周期记账，被装饰的名字在会话目录中无宿主行时永不触发。菜单查询按顺序且不区分大小写地模糊匹配命令名的子序列；前缀排名最高。
+贡献项是客户端自有命令，与宿主命令同名会明确报错。它的 UI 是 popupSelect 规格或动作：裸调用消费触发 token 后运行回调，不提交消息。业务包负责自己的动作及可用性，输入框通过同一 API 注册「文件」。装饰为已有宿主命令添加裸调用弹窗或动作，并保留其目录行、参数认领与生命周期记录；没有匹配的宿主行时不触发。菜单查询按顺序、不区分大小写地模糊匹配命令名与标题的子序列，前缀优先，不显示小节标题。
+
+### 内置行的展示面
+
+内置命令定义携带稳定的 `definitionId`。客户端按标识选择本地化标题、说明、图标和输入写法，修改宿主说明不会改变选择结果。没有匹配标识的同名覆盖保留自己的文案，也不获得内置别名。在任何界面语言下，中英文写法都通过同一个会话有效目录解析，草稿保留手输写法，提交使用宿主注册名。贡献项提供自己的 `label`、`description` 和 `icon`，每次生成候选项时读取。空查询按名称确定小节顺序，未列出的行排在「指令」末尾。
 
 ### 带附件提交
 
@@ -43,7 +47,7 @@ composer 携带图片或通用文件提交时，只有声明了 `input.attachmen
 <details>
 <summary>实现细节——点击展开</summary>
 
-`src/client/contract.ts` 是固定的业务约定：`CommandUiContract.register(name, spec)` 与 `decorate(name, spec)` 是业务包消费的全部内容。`CommandDirectory` 是唯一的 wire 派生缓存，以会话为 key：普通会话经 `command.list({sessionId})` 拉取；条目由转发的 `commands/change` owner 事件软失效、由 `connection/reset` 硬失效，并以 epoch 把关，被取代的旧拉取永远无法覆盖更新的结果。`matchSpace` 只凭该缓存同步应答；`matchEnter` 在 SubmitAttempt 信号上强等缓存，预热失败即拒绝。`command.execute` 返回匹配结果后，浏览器发布本地 `command/executed` 确认；其他客户端经宿主事件流收到持久命令节点，但收不到这条确认。`PopupSelectController` 是不含界面的外壳状态；`PopupSelectView` 自注册进 `conversation.input.overlay`，按会话解析。
+`src/client/contract.ts` 定义贡献项和装饰的注册接口。`CommandDirectory` 负责会话级协议缓存，并通过 `resolution.ts` 解析输入命令；该模块负责内置命令标识匹配和本地化输入写法。`matchSpace` 同步读取就绪缓存，`matchEnter` 等待缓存就绪，预热失败或取消时拒绝。转发的目录和连接事件使缓存失效。宿主执行匹配的命令后，本浏览器发布 `command/executed`，其他客户端只观察持久命令事件。`PopupSelectController` 负责弹窗状态，`PopupSelectView` 占据输入浮层。`presentation.ts` 负责行标题、图标和分节，展示与解析辅助函数均留在插件内部。
 
 </details>
 

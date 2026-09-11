@@ -38,9 +38,7 @@
   - img
   - text: "feedback Feedback recorded for session session-{{uuid}} Anonymous user: {{uuid}}."
 - textbox "Message or run a task, / commands, @ files or sessions"
-- button "Commands":
-  - img
-- button "Add attachment":
+- button "Add files or run commands":
   - img
 - 'button "Access mode, current: Workspace Write"': Workspace Write
 - button "Select model, current DeepSeek-V4-Flash":

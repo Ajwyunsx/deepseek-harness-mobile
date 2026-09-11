@@ -68,6 +68,7 @@
     { "path": "./packages/extensions/cordis-client-runner" },
     { "path": "./packages/extensions/ui-cordis" },
     { "path": "./packages/test-support/client-runtime" },
+    { "path": "./packages/test-support/remote-mock" },
     { "path": "./packages/client/ui-layout" },
     { "path": "./packages/client/ui-sidebar" },
     { "path": "./packages/client/ui-brand-official" },

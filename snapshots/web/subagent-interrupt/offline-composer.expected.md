@@ -35,9 +35,7 @@
     - button "Steer queued message":
       - img
 - textbox "Parent session offline; sending is unavailable but you can still stop the run" [disabled]
-- button "Commands" [disabled]:
-  - img
-- button "Add attachment" [disabled]:
+- button "Add files or run commands" [disabled]:
   - img
 - 'button "Access mode, current: Custom" [disabled]': Custom
 - button "Stop generating"

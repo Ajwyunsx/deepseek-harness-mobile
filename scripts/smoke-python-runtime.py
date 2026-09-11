@@ -918,6 +918,8 @@ def smoke_sdk_live() -> None:
                     "Use a tool to read that same file and copy its exact current content to the "
                     "new receipt path below, without changing the source file. "
                     "Preserve every byte; do not add a newline or byte-order mark. "
+                    f"{LIVE_API_SENTINEL} is only the completion acknowledgement, "
+                    "not a claim about the source or receipt contents. "
                     f"Then reply with exactly {LIVE_API_SENTINEL}.\n{receipt}"
                 )
                 verified = harness.run(verify_prompt, session_id=session_id)

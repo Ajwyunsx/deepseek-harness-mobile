@@ -874,6 +874,7 @@ describe('authoring a preset on the shipped composition', () => {
  */
 describe('the default preset as a user setting', () => {
   it('composes an unnamed session from the stored default, not the composed one', async () => {
+    expect((await ctx.agentPresets.remoteExportList()).modeSelectionEnabled).toBe(true)
     expect(ctx.agentPresets.defaultId).toBe('standard')
 
     await ctx.settings.update(SETTINGS_NAMESPACE, { default: 'minimal' })

@@ -30,7 +30,7 @@ The [LSP backpressure test](../../../../packages/lsp/lsp-stdio/tests/instance.sp
 
 ### Built-client import classification
 
-The [Node import sweep](../../../../packages/experimental/webworker-runtime/tests/compile/transform-corpus-check.ts) admits the Dockkit bundle only when Node reports `ERR_UNKNOWN_FILE_EXTENSION` for its exact `dockkit.module.css` path. Other errors and unexpectedly successful exempt imports fail. Scoped resolve/load hooks exercise expected CSS failure, arbitrary failure, another stylesheet, another error code, and stale exemption without modifying shared build artifacts.
+The [Node import sweep](../../../../packages/experimental/webworker-runtime/tests/compile/transform-corpus-check.ts) admits the Dockkit bundle only when Node reports `ERR_UNKNOWN_FILE_EXTENSION` for a `.css` file, and fails every other error and every unexpectedly successful exempt import; the [stylesheet exemption decision](../bug-fix/2026-09-10-built-bundle-css-exemption.md) owns which stylesheets that covers. Scoped resolve/load hooks exercise expected CSS failure, another stylesheet, another extension, arbitrary failure, another error code, and stale exemption without modifying shared build artifacts.
 
 ## Alternatives considered
 

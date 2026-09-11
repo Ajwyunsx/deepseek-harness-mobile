@@ -27,7 +27,7 @@ interface MessageFeedbackItem {
   readonly rating: MessageFeedbackRating
   /** Optional explanation, preserved verbatim after validation. */
   readonly note?: string
-  /** Category the human filed a negative judgment under. */
+  /** Category the human filed the judgment under. */
   readonly category?: FeedbackCategory
   /** Equality-only token replaced by every material create or update. */
   readonly version: MessageFeedbackVersion
@@ -298,9 +298,9 @@ fork 种子可以包含父 Session 的反馈事件，但 payload 保留父级 `s
 
 控件是 `conversation.chat.assistant-actions` list slot 的 `feedback` 条目（order 10），该 slot 由 `ui-conversation` 声明，并渲染在已定稿助手消息的 IconActions 行内。`AssistantMessageNode` 携带来自 `assistant/message` 事件的可选 `messageId`。被中断冻结的部分输出没有该字段，渲染点在字段缺失时跳过该 slot。该操作栏每个 Turn 渲染一次，位于收尾的助手消息上：Host 接受每条 append-origin 步骤消息作为目标，但多步骤 Turn 中较早的步骤渲染的是工具行而非可评分正文，因此 UI 暴露的范围比 Host 约定允许的更窄。
 
-每个 Session 一个 `MessageFeedbackController`，支撑该 Session 内所有消息的控件：一次 `list` 读取即填充整段对话，且延迟到首次 hover 或 focus 才发起，而非挂载时触发。每次变更把该 controller 最后观察到的版本作为 `ifVersion` 发送；`version-conflict` 响应携带权威条目，controller 据此对账而不重新拉取。变更按 Session 串行，排队操作与已提交版本比较。`connection/reset` 只刷新已读取过的 Session。
+每个 Session 一个 `MessageFeedbackController`，支撑该 Session 内所有消息的控件：一次 `list` 读取即填充整段对话，且延迟到首次 hover 或 focus 才发起，而非挂载时触发。每次变更把该 controller 最后观察到的版本作为 `ifVersion` 发送；`version-conflict` 响应携带权威条目，controller 据此对账而不重新拉取。变更按 Session 串行，排队操作与已提交版本比较。注入的 `retract` 操作会在该队列内重新检查已提交评分，并在并发变更后变为无操作，因此陈旧 UI 无法绕过弹窗记录裸评分。`connection/reset` 只刷新已读取过的 Session。
 
-点赞立即记录不带备注的好评并显示确认 toast。点踩打开该 Session 的反馈弹窗，即 `conversation.input.overlay` 的 `feedback-dialog` 条目：共用的 Modal 卡片，里面是七个分类标签和一个详情框。提交会 put 一条差评，带上所选分类与去除首尾空白的描述，两者也可都不带。不带文本的 `/feedback`（`ui-commands` 以 `action` 路由的一个装饰）为 Session 打开同一个弹窗，随后通过 `sessionFeedback.record` 记录；`/feedback <text>` 仍走宿主命令路径。再次点击已记录的评分会撤回它。
+任一未记录的评分都会打开该 Session 的反馈弹窗，即 `conversation.input.overlay` 的 `feedback-dialog` 条目：共用的 Modal 卡片，里面是七个分类标签和一个详情框。提交会 put 所选评分，带上所选分类与去除首尾空白的描述，两者也可都不带；成功会关闭弹窗并显示确认 toast，失败则保留弹窗与草稿并显示警告 toast。不带文本的 `/feedback`（`ui-commands` 以 `action` 路由的一个装饰）为 Session 打开同一个弹窗，随后通过 `sessionFeedback.record` 记录；`/feedback <text>` 仍走宿主命令路径。再次点击已记录的评分会直接撤回，不打开弹窗。
 
 ## 边界与限制
 

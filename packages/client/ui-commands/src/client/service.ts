@@ -2,10 +2,12 @@
  * CommandUiRuntime (`ctx.commandUi`): the '/' command source over the
  * session-keyed directory, the client-contribution registry, and the
  * per-session popupSelect controllers. Candidate synthesis merges the host
- * catalog with contributions by availability, then position filtering and
- * the `/` menu's shared name ranking (ui-primitives `rankByName`); a
- * host/contribution name collision fails loud. Every execute
- * addresses the session's agent by sessionId — sessions are always
+ * catalog with contributions by availability, gives built-in Host rows their
+ * localized face (presentation.ts), then position-filters; an empty query
+ * lists the Add and Commands sections in usage order, a typed query ranks
+ * every row by the `/` menu's shared name-and-label ranking (ui-primitives
+ * `rankByName`). A host/contribution name collision fails loud. Every
+ * execute addresses the session's agent by sessionId — sessions are always
  * agent-backed.
  */
 import { Service } from '@deepseek-ai/cordis'
@@ -26,8 +28,9 @@ import type {
 import type { CommandContribution, CommandDecoration, CommandUiContract } from './contract.ts'
 import type { CommandDescriptor } from './directory.ts'
 import { CommandDirectory } from './directory.ts'
-import { en, type CommandKey } from './locales.ts'
 import { PopupSelectController } from './popup.ts'
+import { builtinRowFace, sectionRows } from './presentation.ts'
+import { claimToken } from './resolution.ts'
 import type { TokenSegment } from './popup.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -58,16 +61,6 @@ interface LiveState {
   readonly decorations: Map<string, CommandDecoration>
   readonly popups: Map<SessionId, PopupSelectController<ClientSessionContext>>
 }
-
-/** Locale keys for the canonical first-party Host command descriptions. */
-const HOST_DESCRIPTION_KEYS = new Map<string, CommandKey>([
-  ['compact', 'description.compact'],
-  ['export', 'description.export'],
-  ['feedback', 'description.feedback'],
-  ['goal', 'description.goal'],
-  ['permission', 'description.permission'],
-  ['plan', 'description.plan'],
-])
 
 /** Command surface: session-keyed directory + '/' source + contribution registry + per-session popups. */
 export class CommandUiRuntime extends Service implements CommandUiContract {
@@ -196,7 +189,11 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     }
   }
 
-  /** Menu candidates: host catalog + contribution availability, then position filtering and the shared name ranking. */
+  /**
+   * Menu candidates: host catalog + contribution availability, built-in rows
+   * localized, then position filtering; sections for an empty query, the
+   * shared name-and-label ranking for a typed one.
+   */
   private async candidates(session: ClientSessionContext, req: CandidateRequest): Promise<readonly InputTriggerCandidate[]> {
     const list = await this.directory.ensureReady(session.sessionId, req.signal)
     const rows: InputTriggerCandidate[] = []
@@ -205,7 +202,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
       seen.add(c.name)
       rows.push({
         name: c.name,
-        description: this.hostDescription(c),
+        ...(builtinRowFace(c, this.t) ?? { description: c.description }),
         ...(c.input !== undefined ? { hint: c.input.hint } : {}),
       })
     }
@@ -214,18 +211,15 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
       if (seen.has(contribution.name)) {
         throw new Error(`ui-commands: contribution /${contribution.name} collides with a host command`)
       }
-      rows.push({ name: contribution.name, description: contribution.description() })
+      rows.push({
+        name: contribution.name,
+        ...(contribution.label === undefined ? {} : { label: contribution.label() }),
+        ...(contribution.description === undefined ? {} : { description: contribution.description() }),
+        ...(contribution.icon === undefined ? {} : { icon: contribution.icon }),
+      })
     }
-    return rankByName(
-      rows.filter(c => req.position === 'leading' || c.hint === undefined),
-      req.query,
-    )
-  }
-
-  /** Translate exact built-in Host copy while preserving scoped or third-party descriptors verbatim. */
-  private hostDescription(command: CommandDescriptor): string {
-    const key = HOST_DESCRIPTION_KEYS.get(command.name)
-    return key !== undefined && command.description === en[key] ? this.t(key) : command.description
+    const visible = rows.filter(c => req.position === 'leading' || c.hint === undefined)
+    return req.query === '' ? sectionRows(visible, this.t) : rankByName(visible, req.query)
   }
 
   /** Decision table, menu column: contribution/decorated-host → popup or action; host input → claim; host bare → detached execute. */
@@ -246,7 +240,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
       this.invoke(name, decoration.ui, pick.session, { via: 'menu', span: pick.span })
       return 'handled'
     }
-    if (desc.input !== undefined) return { claim: this.leadingClaim(desc, pick.session) }
+    if (desc.input !== undefined) return { claim: this.leadingClaim(desc, pick.session, claimToken(desc, this.t)) }
     // Menu-pick execute consumes the trigger span before the detached run
     // (scoped event; the input owns the CAS guard).
     this.consumeVia(pick.session.sessionId, { via: 'menu', span: pick.span })
@@ -257,11 +251,10 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   /** Decision table, space column: hot-key sync check; only host leadingInput claims. */
   private matchSpace(session: ClientSessionContext, token: string): PickOutcome {
     if (!token.startsWith('/')) return undefined
-    const name = token.slice(1)
-    if (this.live.contributions.has(name)) return undefined // popup and action kinds never claim on space
-    const desc = this.directory.resolve(session.sessionId, name)
+    if (this.live.contributions.has(token.slice(1))) return undefined // popup and action kinds never claim on space
+    const desc = this.directory.resolve(session.sessionId, token.slice(1))
     if (desc === undefined || desc.input === undefined) return undefined
-    return { claim: this.leadingClaim(desc, session) }
+    return { claim: this.leadingClaim(desc, session, token.slice(1)) }
   }
 
   /**
@@ -276,6 +269,9 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
    * refusal so the machine surfaces one composer notice and the draft and
    * attachments stay in place; nothing executes and nothing is dropped. An
    * action submits nothing and runs regardless.
+   *
+   * A typed token is resolved through the localized claim tokens, so a line
+   * written as `/计划` reaches the `plan` descriptor and executes as `/plan`.
    */
   private async matchEnter(
     session: ClientSessionContext,
@@ -288,21 +284,23 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     const ws = trimmed.search(/\s/)
     const token = ws === -1 ? trimmed : trimmed.slice(0, ws)
     const bare = ws === -1
-    const name = token.slice(1)
-    if (name === '') return undefined
+    const typedName = token.slice(1)
+    if (typedName === '') return undefined
     const refuseAttachments = (): never => {
-      throw new Error(this.t('notice.attachmentsUnsupported', { command: name }))
+      throw new Error(this.t('notice.attachmentsUnsupported', { command: typedName }))
     }
-    const contribution = this.live.contributions.get(name)
+    const contribution = this.live.contributions.get(typedName)
     if (contribution !== undefined && contribution.available(session)) {
       if (!bare) return undefined
       if (envelope.attachments > 0 && contribution.ui.kind !== 'action') refuseAttachments()
-      this.invoke(name, contribution.ui, session, { via: 'enter', token })
+      this.invoke(typedName, contribution.ui, session, { via: 'enter', token })
       return 'handled'
     }
     await this.directory.ensureReady(session.sessionId, signal)
-    const desc = this.directory.resolve(session.sessionId, name)
+    const desc = this.directory.resolve(session.sessionId, typedName)
     if (desc === undefined) return undefined
+    const name = desc.name
+    const canonical = `/${name}${trimmed.slice(token.length)}`
     // Bare enter on a decorated host command opens its popup; an argued line
     // never consults the decoration (the claim/detached paths below own it).
     if (bare) {
@@ -315,12 +313,12 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     }
     if (desc.input !== undefined) {
       if (envelope.attachments > 0 && desc.input.attachments !== true) refuseAttachments()
-      return { claim: this.leadingClaim(desc, session) }
+      return { claim: this.leadingClaim(desc, session, token.slice(1)) }
     }
     if (!bare) return undefined
     if (envelope.attachments > 0) refuseAttachments()
     this.consumeVia(session.sessionId, { via: 'enter', token })
-    this.runDetached(desc, session, trimmed)
+    this.runDetached(desc, session, canonical)
     return 'handled'
   }
 
@@ -344,14 +342,22 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     this.popupFor(actx).open(name, ui, session, segment)
   }
 
-  /** Build the leadingInput claim: token `/name ` + the command.execute submit transaction. */
-  private leadingClaim(desc: CommandDescriptor, session: ClientSessionContext): CommandClaim {
-    const token = `/${desc.name} `
+  /**
+   * Build the leadingInput claim. The composer keeps the claimed token in
+   * the draft and reads the arguments after it, so the token is the spelling
+   * the draft will carry: the locale's token for a menu pick, the typed
+   * spelling for Space and Enter. The command.execute submit transaction
+   * always sends the catalog name.
+   */
+  private leadingClaim(desc: CommandDescriptor, session: ClientSessionContext, shown: string): CommandClaim {
+    const token = `/${shown} `
+    const line = `/${desc.name} `
     return {
+      name: desc.name,
       token,
       ...(desc.input !== undefined ? { hint: desc.input.hint } : {}),
       ...(desc.input?.attachments === true ? { attachments: true } : {}),
-      submit: (args, _actx, attachments) => this.execute(session, token + args, attachments),
+      submit: (args, _actx, attachments) => this.execute(session, line + args, attachments),
     }
   }
 

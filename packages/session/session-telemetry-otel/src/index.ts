@@ -246,6 +246,7 @@ export class OpenTelemetrySessionBackend extends SessionTelemetryBackend {
     ctx.on('session/event', (session, event) => {
       if (!isFeedback(session, event)) return
       // Only the canonical appended event authorizes this exact prefix.
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       if (session.eventAt(event.seq) !== event) {
         ctx.logger.warn(NON_CANONICAL_EVENT_WARNING)
         return

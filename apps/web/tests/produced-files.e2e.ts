@@ -171,6 +171,37 @@ describe('web e2e: a finished turn ends with the files it produced', () => {
     expect(await page.getByRole('button', { name: /folder/i }).count()).toBe(0)
     expect(await page.getByText('Files changed', { exact: true }).count()).toBe(1)
 
+    const turnSpacing = await page.evaluate((done) => {
+      const requiredElement = <T extends Element>(value: T | null | undefined, name: string): T => {
+        if (value === null || value === undefined) throw new Error(`produced-file layout is missing ${name}`)
+        return value
+      }
+      const answer = requiredElement(
+        [...document.querySelectorAll<HTMLElement>('[data-chat-flow-kind="assistant-step"]')]
+          .find(element => element.textContent?.includes(done)),
+        'final answer',
+      )
+      const producedRow = requiredElement(
+        document.querySelector<HTMLElement>('[data-produced-files-row]'),
+        'produced row',
+      )
+      const producedRoot = requiredElement(producedRow.parentElement?.parentElement, 'produced root')
+      const turnTail = requiredElement(producedRoot.closest<HTMLElement>('[data-turn-tail]'), 'turn tail')
+      const actions = requiredElement(
+        turnTail.querySelector<HTMLButtonElement>('button[aria-label="Copy"]')?.parentElement,
+        'action row',
+      )
+      const answerRect = answer.getBoundingClientRect()
+      const producedRect = producedRoot.getBoundingClientRect()
+      const actionsRect = actions.getBoundingClientRect()
+      return {
+        answerToProduced: producedRect.top - answerRect.bottom,
+        producedToActions: actionsRect.top - producedRect.bottom,
+      }
+    }, DONE)
+    expect(turnSpacing.answerToProduced).toBeCloseTo(20, 1)
+    expect(turnSpacing.producedToActions).toBeCloseTo(20, 1)
+
     const tops = await row.locator(':scope > *:visible').evaluateAll(elements =>
       elements.map(element => element.getBoundingClientRect().top))
     expect(new Set(tops.map(top => Math.round(top))).size).toBe(1)

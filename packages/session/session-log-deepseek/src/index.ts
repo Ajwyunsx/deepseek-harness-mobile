@@ -120,6 +120,7 @@ export function acceptedThrough(session: Session): SessionSeqCursor {
   const length = session.seq
   const start = previous?.scannedEvents ?? SessionLogOffset(0)
   for (let index = start; index < length; index++) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const event = session.eventAt(SessionSeq(index))
     if (event === undefined) {
       throw new Error(`session-log-deepseek: missing event ${String(index)} below captured length ${String(length)}`)
@@ -164,9 +165,11 @@ export function apply(ctx: Context, config: Config): void {
       if (session === undefined) return undefined
 
       const afterSeq = acceptedThrough(session)
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const snapshot = session.snapshotEvents()
       const throughSeq = snapshot.at(-1)?.seq
       if (throughSeq === undefined) return undefined
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const suffix = session.snapshotEvents(SessionLogOffset(afterSeq + 1))
       const value: DeepSeekSessionLogExtension = {
         version: 1,

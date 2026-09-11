@@ -1,5 +1,5 @@
 /**
- * The feedback dialog and its acknowledgement toast, rendered as one entry
+ * The feedback dialog and its acknowledgement and failure toasts, rendered as one entry
  * of `conversation.input.overlay` so each Session owns exactly one of each.
  * The Modal and the Toast both portal to `document.body`; the overlay slot
  * only supplies the per-session controller and the composer card the toast
@@ -8,7 +8,9 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, IconCheckOutline16, Modal, Toast } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconCheckOutline16, IconWarningOutline16, Modal, Toast,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FeedbackCategory } from '@deepseek-ai/dsh-command-feedback/types'
 import type { FeedbackDialogProps } from './slots.ts'
 import css from './FeedbackDialog.module.css'
@@ -38,9 +40,11 @@ const FAILURE_COPY: Partial<Record<string, 'error.conflict' | 'error.noteTooLarg
 /**
  * Render one Session's feedback dialog and toast.
  * @param props - the dialog hook, the draft verbs, and the locale seat.
- * @returns the modal while a target is open, the toast while one is showing.
+ * @returns the modal while a target is open and either toast while it is showing.
  */
-export function FeedbackDialog({ useDialog, edit, submit, dismiss, dismissToast, t }: FeedbackDialogProps) {
+export function FeedbackDialog({
+  useDialog, edit, submit, dismiss, dismissFailure, dismissToast, t,
+}: FeedbackDialogProps) {
   const state = useDialog(s => s)
   // The toast centers over the composer card this entry renders inside of.
   const probeRef = useRef<HTMLSpanElement>(null)
@@ -53,18 +57,30 @@ export function FeedbackDialog({ useDialog, edit, submit, dismiss, dismissToast,
   // A toast retires with the entry that showed it: the Toast's own timer dies
   // on unmount, and the Session's controller must not replay it on return.
   useEffect(() => () => { dismissToast(toast) }, [dismissToast, toast])
-  const failure = state.failure === null ? null : t(FAILURE_COPY[state.failure] ?? 'error.generic')
+  const failureCode = state.failure
+  const failure = failureCode === null ? null : t(FAILURE_COPY[failureCode] ?? 'error.generic')
+  const onFailureDone = useCallback(() => { dismissFailure() }, [dismissFailure])
 
   return (
     <>
       <span ref={probeRef} hidden />
-      {toast > 0 && (
+      {toast > 0 && failure === null && (
         <Toast
           key={toast}
           text={t('toast.recorded')}
           icon={<span className={css.toastIcon}><IconCheckOutline16 size={12} /></span>}
           anchor={card}
           onDone={onToastDone}
+        />
+      )}
+      {failure !== null && (
+        <Toast
+          key={`failure-${failureCode}`}
+          text={failure}
+          icon={<IconWarningOutline16 />}
+          anchor={card}
+          holdMs={6000}
+          onDone={onFailureDone}
         />
       )}
       <Modal
@@ -106,7 +122,6 @@ export function FeedbackDialog({ useDialog, edit, submit, dismiss, dismissToast,
           readOnly={state.submitting}
           onChange={(event) => { edit({ text: event.target.value }) }}
         />
-        {failure !== null && <span className={css.failure} role="status">{failure}</span>}
       </Modal>
     </>
   )

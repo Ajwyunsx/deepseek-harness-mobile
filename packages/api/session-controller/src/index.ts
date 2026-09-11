@@ -207,6 +207,7 @@ export class SessionController extends TypertRemoteService {
       return Promise.resolve({
         meta: attached.header,
         inheritedEventCount: attached.inheritedEventCount,
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
         events: attached.snapshotEvents(),
       })
     }

@@ -11,6 +11,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -254,6 +255,7 @@ export class PermissionPresetService extends Service {
     // activates only when a command registry is composed.
     ctx.inject(['commands'], (commandCtx) => {
       commandCtx.commands.register({
+        definitionId: CommandDefinitionId('@deepseek-ai/dsh-permission-presets'),
         name: 'permission',
         description: 'Switch the permission preset (sandbox mode + approval policy)',
         input: { hint: '<preset>' },

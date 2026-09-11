@@ -52,6 +52,8 @@ kind: "package-reference"
 
 正常 dispose 会终止每个仍在运行的受管范围与终端会话并等待其完全停稳。在 JavaScript 可观察的宿主退出期间——直接 `process.exit()`、默认未捕获异常、默认未处理 rejection——同步最终清理会请求 Linux scope 终止其成员，同步终止每个 Windows runner 以关闭其唯一 Job handle，并为 fallback 使用既有 PGID、`taskkill` 或已捕获身份操作。它不创建 Promise 或定时器，也不声称已经完全停稳。同一退出阶段会删除未持有任何已完成 spill 文件的每进程私有 spill 目录；已完成的 spill 文件作为完整输出恢复产物保留，直到外部机制清理。未处理的 `SIGTERM`/`SIGINT`/`SIGHUP`、`SIGKILL`、fatal OOM、native crash 与断电需要外部 supervisor。
 
+Linux 普通进程和终端进程即使在 bootstrap 消费启动请求前被取消，也会保留实际观察到的终止信号。如果没有请求对应的终止信号，未消费的请求仍会报启动失败；已记录的 pre-exec 错误始终优先。`waitForExit()` 独立证明 scope 已为空，其中也包括 payload 在进入该 scope 的 cgroup 前就被杀死、manager 因此让它保持 active 却没有任何进程的 scope。
+
 ### 可能出错的地方
 
 无法解析的可执行文件会明确报出稳定错误。当 spawn 或提供方故障使 direct outcome 无法产生时，`done` 会 reject；该 rejection 不能证明 target 是否已经开始执行。若所选 owner 无法再证明其范围为空，`waitForExit()` 会 reject，清理仍会尝试终止。越过保留尾部的读取是 `lossy` 的，并在 spill 文件存在时指向它。fallback 进程组或已观察终端 session 可能遗漏在观察前逃逸的后代——见下文限制。

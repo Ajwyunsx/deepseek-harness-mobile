@@ -83,7 +83,7 @@ function measureList(page: Page): Promise<ListMetrics> {
       })
       .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule)
       .filter(rule => rule.selectorText === '::-webkit-scrollbar-thumb:hover')
-      .map(rule => rule.style.getPropertyValue('background'))
+      .map(rule => rule.style.getPropertyValue('background-color'))
     const style = getComputedStyle(list)
     const pseudoWidth = getComputedStyle(list, '::-webkit-scrollbar').width
     const barWidth = pseudoWidth === 'auto' ? 15 : Number.parseFloat(pseudoWidth)

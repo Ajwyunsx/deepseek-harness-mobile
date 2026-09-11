@@ -8,15 +8,18 @@
  * lifecycle, and the directory invalidation event subscriptions.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { RemoteError, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
+import { IconGoalOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ClientSessionContext, ConsumeTokenRequest, InputTriggerPick, InputTriggerSource, SubmitAttachment } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type { CommandContribution, CommandDecoration, PopupSelectSpec, SelectOption } from '../src/client/contract.ts'
 import type { CommandDescriptor } from '../src/client/directory.ts'
 import { CommandUiRuntime } from '../src/client/service.ts'
+import { en, zh, type CommandKey } from '../src/client/locales.ts'
 
 const sid = (k: string): SessionId => k as SessionId
 
@@ -226,7 +229,7 @@ describe('candidates', () => {
     const { source, listCalls } = await bench()
     const names = (await source.candidates(proj('s2'), req(''))).map(c => c.name)
     expect(listCalls).toEqual([{ sessionId: sid('s2') }])
-    expect(names).toEqual(['plan', 'goal', 'attach'])
+    expect(names).toEqual(['goal', 'plan', 'attach'])
   })
 
   it('hides leadingInput commands at inline position', async () => {
@@ -240,7 +243,7 @@ describe('candidates', () => {
     const available = vi.fn((session: ClientSessionContext) => session.sessionId === sid('s1'))
     command.register(themeContribution({ available }))
     const s1Names = (await source.candidates(proj('s1'), req(''))).map(c => c.name)
-    expect(s1Names).toEqual(['plan', 'goal', 'theme'])
+    expect(s1Names).toEqual(['goal', 'plan', 'theme'])
     expect(available).toHaveBeenLastCalledWith(proj('s1'))
     const s2Names = (await source.candidates(proj('s2'), req(''))).map(c => c.name)
     expect(s2Names).not.toContain('theme')
@@ -256,7 +259,7 @@ describe('candidates', () => {
   it('localizes canonical built-in and contribution descriptions on every candidate request', async () => {
     let locale = 'zh'
     const commands: CommandDescriptor[] = [
-      { name: 'compact', description: 'Compact older conversation history' },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-compact'), name: 'compact', description: 'Compact older conversation history' },
       { name: 'goal', description: 'scoped goal override' },
       { name: 'custom', description: 'plugin-authored copy' },
     ]
@@ -266,19 +269,21 @@ describe('candidates', () => {
     })
     command.register(themeContribution({ description: () => `${locale}:theme` }))
 
-    await expect(source.candidates(proj('s1'), req(''))).resolves.toEqual([
-      { name: 'compact', description: 'zh:command:description.compact' },
-      { name: 'goal', description: 'scoped goal override' },
-      { name: 'custom', description: 'plugin-authored copy' },
-      { name: 'theme', description: 'zh:theme' },
+    // Rows read as [name, label, description]; the empty query orders by section.
+    const faces = async () => (await source.candidates(proj('s1'), req(''))).map(c => [c.name, c.label, c.description])
+    await expect(faces()).resolves.toEqual([
+      ['goal', undefined, 'scoped goal override'],
+      ['compact', 'zh:command:label.compact', 'zh:command:description.compact'],
+      ['custom', undefined, 'plugin-authored copy'],
+      ['theme', undefined, 'zh:theme'],
     ])
 
     locale = 'en'
-    await expect(source.candidates(proj('s1'), req(''))).resolves.toEqual([
-      { name: 'compact', description: 'en:command:description.compact' },
-      { name: 'goal', description: 'scoped goal override' },
-      { name: 'custom', description: 'plugin-authored copy' },
-      { name: 'theme', description: 'en:theme' },
+    await expect(faces()).resolves.toEqual([
+      ['goal', undefined, 'scoped goal override'],
+      ['compact', 'en:command:label.compact', 'en:command:description.compact'],
+      ['custom', undefined, 'plugin-authored copy'],
+      ['theme', undefined, 'en:theme'],
     ])
   })
 
@@ -288,6 +293,157 @@ describe('candidates', () => {
     await expect(source.candidates(proj('s1'), req(''))).rejects.toThrow('collides with a host command')
   })
 
+  describe('menu presentation (design doc for #3567)', () => {
+    /** First-party definitions plus an unrelated command, in Host registration order. */
+    const SHIPPED: CommandDescriptor[] = [
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-compact'), name: 'compact', description: 'Compact older conversation history' },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-session-log-export'), name: 'export', description: 'Download this Session log as a ZIP archive' },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-feedback'), name: 'feedback', description: 'Record feedback about this session', input: { hint: '<text>' } },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-goal'), name: 'goal', description: 'Set or view the goal for a long-running task', input: { hint: '<objective>', attachments: true } },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-permission-presets'), name: 'permission', description: 'Switch the permission preset (sandbox mode + approval policy)', input: { hint: '<preset>' } },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-plan-mode'), name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
+      { name: 'deploy', description: 'third-party command' },
+    ]
+    const Glyph = () => null
+    const fileContribution = (run = vi.fn()): CommandContribution => ({
+      name: 'file',
+      label: () => 'command:label.file',
+      icon: Glyph,
+      available: () => true,
+      ui: { kind: 'action', run },
+    })
+    const modelContribution = (): CommandContribution => ({
+      name: 'model',
+      label: () => '模型',
+      description: () => '选择本会话使用的模型',
+      icon: Glyph,
+      available: () => true,
+      ui: themeUi(),
+    })
+
+    it('an empty query lists Add then Commands in usage order; built-in rows carry their localized face, other rows their own text', async () => {
+      const { command, source } = await bench({ commands: () => Promise.resolve({ commands: SHIPPED }) })
+      command.register(modelContribution())
+      command.register(fileContribution())
+      const rows = await source.candidates(proj('s1'), req(''))
+      expect(rows.map(row => row.name)).toEqual([
+        'file', 'goal', 'plan', 'feedback', 'compact', 'permission', 'model', 'export', 'deploy',
+      ])
+      expect(rows.map(row => row.section)).toEqual([
+        ...Array<string>(4).fill('command:section.add'),
+        ...Array<string>(5).fill('command:section.commands'),
+      ])
+      expect(rows[1]).toEqual({
+        name: 'goal',
+        label: 'command:label.goal',
+        description: 'command:description.goal',
+        icon: IconGoalOutline16,
+        hint: '<objective>',
+        section: 'command:section.add',
+      })
+      expect(rows[0]).toEqual({ name: 'file', label: 'command:label.file', icon: Glyph, section: 'command:section.add' })
+      expect(rows[6]).toMatchObject({ name: 'model', label: '模型', description: '选择本会话使用的模型', icon: Glyph })
+      // A third-party command keeps its catalog text and gets no glyph.
+      expect(rows[8]).toEqual({ name: 'deploy', description: 'third-party command', section: 'command:section.commands' })
+    })
+
+    it('a same-name override keeps its own presentation even when it copies the first-party description', async () => {
+      const commands: CommandDescriptor[] = [{ name: 'goal', description: en['description.goal'], input: { hint: 'x' } }]
+      const { source } = await bench({ commands: () => Promise.resolve({ commands }) })
+      const [row] = await source.candidates(proj('s1'), req(''))
+      expect(row).toEqual({ name: 'goal', description: en['description.goal'], hint: 'x', section: 'command:section.add' })
+      expect(source.matchSpace!(proj('s1'), '/目标')).toBeUndefined()
+      expect(await source.matchEnter!(proj('s1'), '/目标 x', new AbortController().signal, { attachments: 0 })).toBeUndefined()
+      expect(source.matchSpace!(proj('s1'), '/goal')).toHaveProperty('claim.name', 'goal')
+    })
+
+    it.each([['en', en], ['zh', zh]] as const)('description edits preserve menu claims and bilingual parsing under %s', async (_locale, dictionary) => {
+      const commands = SHIPPED.map(command => ({ ...command, description: command.description + '.' }))
+      const { fiber, source, warm } = await bench({
+        commands: () => Promise.resolve({ commands }),
+        translate: (_namespace, key) => dictionary[key as CommandKey],
+      })
+      onTestFinished(() => fiber.dispose())
+      await warm(proj('s1'))
+      const rows = await source.candidates(proj('s1'), req(''))
+      for (const name of ['goal', 'plan', 'feedback'] as const) {
+        expect(rows.find(row => row.name === name)?.label).toBe(dictionary[`label.${name}`])
+        const picked = menuPick(source, name, proj('s1'))
+        expect(picked).toHaveProperty('claim.token', `/${dictionary[`token.${name}`]} `)
+        for (const spelling of [en[`token.${name}`], zh[`token.${name}`]]) {
+          expect(source.matchSpace!(proj('s1'), `/${spelling}`)).toHaveProperty('claim.name', name)
+          expect(await source.matchEnter!(proj('s1'), `/${spelling} text`, new AbortController().signal, { attachments: 0 }))
+            .toHaveProperty('claim.token', `/${spelling} `)
+        }
+      }
+    })
+
+    it('a typed query ranks rows flat by name or label and drops the section headings', async () => {
+      const { command, source } = await bench({ commands: () => Promise.resolve({ commands: SHIPPED }) })
+      command.register(modelContribution())
+      const names = async (query: string) => (await source.candidates(proj('s1'), req(query))).map(c => c.name)
+      await expect(names('模型')).resolves.toEqual(['model'])
+      await expect(names('label.goal')).resolves.toEqual(['goal'])
+      await expect(names('ex')).resolves.toEqual(['export'])
+      // Prefix hits lead; the empty-query section order no longer applies.
+      await expect(names('pl')).resolves.toEqual(['plan', 'deploy'])
+      const rows = await source.candidates(proj('s1'), req('pl'))
+      expect(rows.every(row => row.section === undefined)).toBe(true)
+    })
+
+    it('an action contribution: the menu pick consumes the span and runs it; bare enter runs it even with attachments; an argued line misses', async () => {
+      const run = vi.fn()
+      const { command, source, mint, warm } = await bench({ commands: () => Promise.resolve({ commands: SHIPPED }) })
+      command.register(fileContribution(run))
+      const scope = mint('s1')
+      const consumes: ConsumeTokenRequest[] = []
+      scope.ctx.on('slash/input-consume-token', (r) => { consumes.push(r); return true })
+      await warm(proj('s1'))
+      expect(menuPick(source, 'file', proj('s1'))).toBe('handled')
+      expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 5, draftRev: 3 } } }])
+      expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'))
+      expect(await source.matchEnter!(proj('s1'), '/file', new AbortController().signal, { attachments: 2 })).toBe('handled')
+      expect(consumes[1]).toEqual({ guard: { kind: 'bare-token', token: '/file' } })
+      expect(run).toHaveBeenCalledTimes(2)
+      expect(await source.matchEnter!(proj('s1'), '/file now', new AbortController().signal, { attachments: 0 })).toBeUndefined()
+      expect(source.matchSpace!(proj('s1'), '/file')).toBeUndefined()
+    })
+
+    it('a built-in claim shows the localized token and submits the catalog name', async () => {
+      const { source, warm, executeCalls } = await bench({ commands: () => Promise.resolve({ commands: SHIPPED }) })
+      await warm(proj('s1'))
+      const outcome = menuPick(source, 'plan', proj('s1'))
+      if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected the claim')
+      expect(outcome.claim.token).toBe('/command:token.plan ')
+      await outcome.claim.submit('do x', new Context(), [])
+      expect(executeCalls).toEqual([{ sessionId: sid('s1'), line: '/plan do x', images: [] }])
+    })
+
+    it('a typed localized token resolves to the built-in command on space and enter; the Host line carries the catalog name', async () => {
+      const { source, mint, warm, executeCalls } = await bench({ commands: () => Promise.resolve({ commands: SHIPPED }) })
+      mint('s1')
+      await warm(proj('s1'))
+      const space = source.matchSpace!(proj('s1'), '/计划')
+      if (space === undefined || space === 'handled' || !('claim' in space)) throw new Error('expected the plan claim')
+      expect(space.claim.hint).toBe('[off|message]')
+      // The claim keeps the typed spelling (the draft carries it and the
+      // arguments are read after it); the submission sends the catalog name.
+      expect(space.claim.token).toBe('/计划 ')
+      expect(space.claim.name).toBe('plan')
+      const enter = await source.matchEnter!(proj('s1'), '/目标 ship it', new AbortController().signal, { attachments: 0 })
+      if (enter === undefined || enter === 'handled' || !('claim' in enter)) throw new Error('expected the goal claim')
+      expect(enter.claim.attachments).toBe(true)
+      expect(enter.claim.token).toBe('/目标 ')
+      await enter.claim.submit('ship it', new Context(), [])
+      expect(executeCalls).toEqual([{ sessionId: sid('s1'), line: '/goal ship it', images: [] }])
+      const typed = await source.matchEnter!(proj('s1'), '/plan now', new AbortController().signal, { attachments: 0 })
+      if (typed === undefined || typed === 'handled' || !('claim' in typed)) throw new Error('expected the plan claim')
+      expect(typed.claim.token).toBe('/plan ')
+      executeCalls.length = 0
+      expect(await source.matchEnter!(proj('s1'), '/压缩', new AbortController().signal, { attachments: 0 })).toBe('handled')
+      await vi.waitFor(() => { expect(executeCalls).toEqual([{ sessionId: sid('s1'), line: '/compact', images: [] }]) })
+    })
+  })
 })
 
 describe('decorations (bare-invocation UI on host commands)', () => {
@@ -302,7 +458,7 @@ describe('decorations (bare-invocation UI on host commands)', () => {
     const { command, source } = await bench()
     command.decorate(goalDecoration())
     const names = (await source.candidates(proj('s1'), req(''))).map(c => c.name)
-    expect(names).toEqual(['plan', 'goal'])
+    expect(names).toEqual(['goal', 'plan'])
   })
 
   it('bare enter opens the popup; an argued line never consults the decoration (host claim)', async () => {

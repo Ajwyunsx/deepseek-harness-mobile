@@ -10,7 +10,7 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
-  ArbitrateKey, ArbitrateOutcome, PickOutcome,
+  ArbitrateKey, ArbitrateOutcome, PickOutcome, ReferenceInsert,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { detectTrigger } from '../core/detect.ts'
@@ -303,6 +303,27 @@ export class InputTriggerController {
       return Promise.reject(new Error(`slash: no serializer for reference source "${source}"`))
     }
     return owner.codec.serialize(ref, signal)
+  }
+
+  /**
+   * Route a chip to its owner or an editable token to its current lexicon owner.
+   * @param source - chip source name; undefined for editable text.
+   * @param reference - source-owned id and optional chip glyph.
+   * @returns whether an owner accepted the preview, possibly awaiting its catalog.
+   */
+  openReference(source: string | undefined, reference: Pick<ReferenceInsert, 'ref' | 'appearance'>): boolean {
+    if (this.disposed) return false
+    const session = this.project()
+    for (const owner of this.deps.roster.all()) {
+      const matches = source === undefined
+        ? reference.ref.startsWith(owner.trigger) && owner.lexicon?.(session)?.includes(reference.ref.slice(1))
+        : owner.name === source
+      if (matches && owner.openReference?.(session, reference)) {
+        this.dismiss()
+        return true
+      }
+    }
+    return false
   }
 
   /**

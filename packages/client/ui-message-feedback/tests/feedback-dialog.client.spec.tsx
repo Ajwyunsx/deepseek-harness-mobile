@@ -3,9 +3,9 @@
  * FeedbackDialog rendering: the modal shows the seven category chips, the
  * detail box, and the hint while a target is open; a chip toggles the
  * category through the injected verb; Submit routes to the controller and
- * stays enabled with an empty draft; a failure code renders its copy; and the
- * acknowledgement toast mounts from the toast sequence and retires through
- * dismissToast once its fade completes.
+ * stays enabled with an empty draft; a failure code renders a warning toast;
+ * and the acknowledgement toast mounts from the toast sequence and retires
+ * through dismissToast once its fade completes.
  */
 import { useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -31,6 +31,7 @@ function mount(overrides: Partial<FeedbackDialogState> = {}) {
     edit: vi.fn(),
     submit: vi.fn(() => Promise.resolve()),
     dismiss: vi.fn(),
+    dismissFailure: vi.fn(),
     dismissToast: vi.fn(),
   }
   const useDialog = (<T,>(select: (v: FeedbackDialogState) => T): T =>
@@ -40,9 +41,11 @@ function mount(overrides: Partial<FeedbackDialogState> = {}) {
 }
 
 describe('FeedbackDialog', () => {
-  it('discloses conversation-log inclusion in both supported locales', () => {
+  it('owns the conversation-log disclosure and stability category in both supported locales', () => {
     expect(zh['dialog.hint']).toBe('填写详情以帮助我们改进体验，提交内容会包括当前对话的日志')
     expect(en['dialog.hint']).toBe('Add details to help us improve. Your submission will include the current conversation log.')
+    expect(zh['category.service-stability']).toBe('稳定性和速度')
+    expect(en['category.service-stability']).toBe('Stability and speed')
   })
 
   it('renders nothing but the probe while closed with no toast', () => {
@@ -99,17 +102,32 @@ describe('FeedbackDialog', () => {
     expect([...chips].every(chip => chip.hasAttribute('disabled'))).toBe(true)
   })
 
-  it('renders the conflict and size copy for their codes and the generic copy otherwise', () => {
+  it('renders submission failures as toasts outside the dialog', () => {
     const conflict = mount({ failure: 'version-conflict' })
-    expect(conflict.getByRole('status').textContent).toBe(zh['error.conflict'])
+    const conflictToast = conflict.getByRole('alert')
+    expect(conflictToast.textContent).toBe(zh['error.conflict'])
+    expect(conflict.getByRole('dialog').contains(conflictToast)).toBe(false)
     cleanup()
 
     const oversized = mount({ failure: 'note-too-large' })
-    expect(oversized.getByRole('status').textContent).toBe(zh['error.noteTooLarge'])
+    expect(oversized.getByRole('alert').textContent).toBe(zh['error.noteTooLarge'])
     cleanup()
 
     const other = mount({ failure: 'session-not-found' })
-    expect(other.getByRole('status').textContent).toBe(zh['error.generic'])
+    expect(other.getByRole('alert').textContent).toBe(zh['error.generic'])
+  })
+
+  it('retires a submission-failure toast after its extended hold', () => {
+    vi.useFakeTimers()
+    try {
+      const ui = mount({ failure: 'version-conflict' })
+
+      act(() => { vi.advanceTimersByTime(7000) })
+
+      expect(ui.dismissFailure).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('retires the toast when the entry unmounts, so a Session switch does not replay it', () => {

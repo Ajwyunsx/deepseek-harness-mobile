@@ -122,7 +122,7 @@ describe('ui-message-feedback browser plugin', () => {
     expect(b.entry()?.inject).toBeTypeOf('function')
   })
 
-  it('exposes the feedback hook plus the ensure/toggle/openDialog/acknowledge verbs', async () => {
+  it('exposes the feedback hook plus the ensure/retract/openDialog verbs', async () => {
     const b = await bench()
     await b.fiber.await()
 
@@ -132,9 +132,8 @@ describe('ui-message-feedback browser plugin', () => {
     expect(face.current(MSG)).toBeUndefined()
     await face.ensure()
     expect(face.current(MSG)).toMatchObject({ messageId: MSG, rating: 'positive' })
-    expect(face.toggle).toBeTypeOf('function')
+    expect(face.retract).toBeTypeOf('function')
     expect(face.openDialog).toBeTypeOf('function')
-    expect(face.acknowledge).toBeTypeOf('function')
   })
 
   it('registers the dialog entry with the documented id, order, and locale', async () => {
@@ -144,16 +143,17 @@ describe('ui-message-feedback browser plugin', () => {
     expect(b.dialogEntry()).toMatchObject({ id: 'feedback-dialog', order: 2, locale: 'feedback' })
     const face = b.dialogEntry()!.inject!(sid('s1'))
     expect(face.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 0 })
+    expect(face.dismissFailure).toBeTypeOf('function')
   })
 
-  it('opens one dialog per Session from the message entry, the decoration, and acknowledges from Like', async () => {
+  it('opens one dialog per Session from the message entry and the decoration', async () => {
     const b = await bench()
     await b.fiber.await()
 
     const message = b.entry()!.inject!(sid('s1'))
     const dialog = b.dialogEntry()!.inject!(sid('s1'))
-    message.openDialog(MSG)
-    expect(dialog.hooks.dialog.getSnapshot().target).toEqual({ kind: 'message', messageId: MSG })
+    message.openDialog(MSG, 'positive')
+    expect(dialog.hooks.dialog.getSnapshot().target).toEqual({ kind: 'message', messageId: MSG, rating: 'positive' })
 
     const decoration = b.decorations.get('feedback')
     expect(decoration?.available({ sessionId: sid('s1') })).toBe(true)
@@ -161,8 +161,6 @@ describe('ui-message-feedback browser plugin', () => {
     decoration.ui.run({ sessionId: sid('s1') })
     expect(dialog.hooks.dialog.getSnapshot().target).toEqual({ kind: 'session' })
 
-    message.acknowledge()
-    expect(dialog.hooks.dialog.getSnapshot().toast).toBe(1)
     expect(b.dialogEntry()!.inject!(sid('s2')).hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 0 })
   })
 
@@ -181,11 +179,11 @@ describe('ui-message-feedback browser plugin', () => {
       .toEqual({ sessionId: 's1', text: 'timed out', category: 'service-stability' })
     expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 1 })
 
-    message.openDialog(MSG)
+    message.openDialog(MSG, 'positive')
     dialog.edit({ category: 'task-result' })
     await dialog.submit()
     expect(b.calls.filter(call => call.method === 'put')[0]?.request).toMatchObject({
-      sessionId: 's1', messageId: MSG, rating: 'negative', category: 'task-result', ifVersion: 'v1',
+      sessionId: 's1', messageId: MSG, rating: 'positive', category: 'task-result', ifVersion: 'v1',
     })
     expect(dialog.hooks.dialog.getSnapshot().toast).toBe(2)
     dialog.dismissToast(2)
@@ -203,6 +201,8 @@ describe('ui-message-feedback browser plugin', () => {
     await dialog.submit()
 
     expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: { kind: 'session' }, failure: 'gateway/internal', toast: 0 })
+    dialog.dismissFailure()
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: { kind: 'session' }, failure: null })
   })
 
   it('keeps the dialog open with the failure code when the Host rejects the remark', async () => {
@@ -251,19 +251,17 @@ describe('ui-message-feedback browser plugin', () => {
     ])
   })
 
-  it('routes toggle to the Remote with the addressed message', async () => {
+  it('routes only a matching retraction to the Remote', async () => {
     const b = await bench()
     await b.fiber.await()
 
     const face = b.entry()!.inject!(sid('s1'))
-    // The seeded item is positive, so a negative toggle replaces it through
-    // put and a positive one retracts it through delete.
-    expect(await face.toggle(MSG, 'negative')).toEqual({ ok: true, rating: 'negative' })
-    expect(await face.toggle(MSG, 'positive')).toEqual({ ok: true, rating: null })
+    // A stale or opposite retraction is a no-op; only the matching rating
+    // reaches delete, so this entry can never bypass the dialog through put.
+    expect(await face.retract(MSG, 'negative')).toEqual({ ok: true })
+    expect(await face.retract(MSG, 'positive')).toEqual({ ok: true })
 
-    expect(b.calls.filter(call => call.method === 'put')[0]?.request).toMatchObject({
-      sessionId: 's1', messageId: MSG, rating: 'negative',
-    })
+    expect(b.calls.filter(call => call.method === 'put')).toHaveLength(0)
     expect(b.calls.filter(call => call.method === 'delete')[0]?.request).toMatchObject({
       sessionId: 's1', messageId: MSG,
     })
@@ -292,7 +290,7 @@ describe('ui-message-feedback browser plugin', () => {
     const face = b.entry()!.inject!(sid('s1'))
     const dialog = b.dialogEntry()!.inject!(sid('s1'))
     await face.ensure()
-    face.openDialog(MSG)
+    face.openDialog(MSG, 'negative')
 
     await b.fiber.dispose()
 
@@ -302,7 +300,7 @@ describe('ui-message-feedback browser plugin', () => {
     expect(dialog.hooks.dialog.getSnapshot().target).toBeNull()
     // A disposed controller refuses further mutations, so no request outlives the fiber.
     const before = b.calls.length
-    expect(await face.toggle(MSG, 'negative')).toMatchObject({ ok: false, error: { code: 'disposed' } })
+    expect(await face.retract(MSG, 'negative')).toMatchObject({ ok: false, error: { code: 'disposed' } })
     expect(b.calls).toHaveLength(before)
   })
 

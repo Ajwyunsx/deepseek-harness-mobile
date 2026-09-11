@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
@@ -172,6 +173,7 @@ describe('CI workflow', () => {
       expect(job['runs-on']).toContain('self-hosted')
       expect(job['runs-on']).toContain('dsh-win-ci')
       expect(job['runs-on']).toContain('dsh-windows-2025-16core')
+      expect(job['runs-on']).toContain('blacksmith-16vcpu-windows-2025')
       expect(job.if).toBe("github.event_name == 'pull_request'")
     }
 
@@ -310,10 +312,43 @@ describe('CI workflow', () => {
       expect(job['runs-on'], `${jobName} runs-on must use the Linux failover switch`).toContain('DSH_CI_FAILOVER_LINUX')
       expect(job['runs-on'], `${jobName} runs-on must not use the Windows failover switch`).not.toContain('DSH_CI_FAILOVER_WINDOWS')
       expect(job['runs-on']).toContain('vm-backup')
+      expect(job['runs-on']).toContain('blacksmith-16vcpu-ubuntu-2404')
     }
     expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
     expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
     expect(aggregate['runs-on']).toContain('vm-backup')
+    expect(aggregate['runs-on']).toContain('blacksmith-4vcpu-ubuntu-2404')
+
+    // Evaluating the full selector, not just substring containment, proves the
+    // blacksmith branch is standalone: it must not fall through to the
+    // self-hosted pool when the two values are mutually exclusive.
+    const selectors = {
+      linux: node24['runs-on'] as string,
+      linuxAggregate: aggregate['runs-on'] as string,
+      windows: windowsBuild['runs-on'] as string,
+    }
+    const evaluate = (expression: string, vars: Record<string, string>, login = 'maintainer'): unknown => {
+      const body = expression.trim().slice(3, -2)
+      return runInNewContext(body, {
+        vars,
+        fromJSON: JSON.parse,
+        github: { event: { pull_request: { user: { login } } } },
+      }, { timeout: 1000 })
+    }
+    for (const [name, selector, variable, pool, hosted] of [
+      ['linux gates', selectors.linux, 'DSH_CI_FAILOVER_LINUX', ['self-hosted', 'linux', 'x64', 'vm-backup'], 'dsh-ubuntu-24-04-16core'],
+      ['linux aggregate', selectors.linuxAggregate, 'DSH_CI_FAILOVER_LINUX', ['self-hosted', 'linux', 'x64', 'vm-backup'], 'ubuntu-latest'],
+      ['windows lanes', selectors.windows, 'DSH_CI_FAILOVER_WINDOWS', ['self-hosted', 'dsh-win-ci', 'windows'], 'dsh-windows-2025-16core'],
+    ] as const) {
+      expect(evaluate(selector, { [variable]: 'blacksmith' }), `${name} blacksmith value`).toMatch(/^blacksmith-/)
+      expect(evaluate(selector, { [variable]: 'selfhosted' }), `${name} selfhosted value`).toEqual(pool)
+      // The blacksmith branch must not capture the selfhosted pool, and the
+      // dependabot exclusion applies to the pool, not to the blacksmith tier.
+      expect(evaluate(selector, { [variable]: 'selfhosted' }, 'dependabot[bot]'), `${name} dependabot on selfhosted`).toBe(hosted)
+      for (const mode of ['', 'hosted', 'unexpected']) {
+        expect(evaluate(selector, { [variable]: mode }), `${name} default on ${mode}`).toBe(hosted)
+      }
+    }
 
     // The run-gates aggregate lanes stop at the first blocking gate failure so
     // a red aggregate does not keep burning runner time on the remaining
@@ -334,6 +369,35 @@ describe('CI workflow', () => {
     // possible, so the first failure must not truncate the rest.
     expect(windowsObservational.env).toBeDefined()
     expect(windowsObservational.env).not.toMatchObject({ DSH_GATE_FAIL_FAST: '1' })
+  })
+
+  it('gates standalone keyless blacksmith jobs and benchmark tiers on the failover variables', () => {
+    const expectedFilenames = workflowJob(loadWorkflow('.github/workflows/expected-filenames.yml'), 'expected-filenames')
+    const sandbox = workflowJob(loadWorkflow('.github/workflows/sandbox.yml'), 'sandbox-e2e')
+    expect(expectedFilenames['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
+    expect(expectedFilenames['runs-on']).toContain("== 'blacksmith'")
+    expect(expectedFilenames['runs-on']).toContain('blacksmith-4vcpu-ubuntu-2404')
+    expect(expectedFilenames['runs-on']).toContain("'ubuntu-latest'")
+    expect(sandbox['runs-on']).toContain("matrix.runner == 'bwrap'")
+    expect(sandbox['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
+    expect(sandbox['runs-on']).toContain('blacksmith-4vcpu-ubuntu-2404')
+    for (const name of ['larger-runner-benchmark', 'consolidated-runner-benchmark'] as const) {
+      const benchmark = workflowJob(loadWorkflow('.github/workflows/ci-master.yml'), name)
+      if (!isRecord(benchmark.strategy) || !isRecord(benchmark.strategy.matrix) || !Array.isArray(benchmark.strategy.matrix.include)) {
+        throw new TypeError(`${name} must define a matrix include list`)
+      }
+      expect(benchmark['runs-on']).toContain('matrix.blacksmith')
+      expect(benchmark['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
+      expect(benchmark['runs-on']).toContain('DSH_CI_FAILOVER_WINDOWS')
+      for (const row of benchmark.strategy.matrix.include as Array<Record<string, string>>) {
+        expect(typeof row.blacksmith, `${name} ${row.cores}-core row must declare a blacksmith label`).toBe('string')
+        if (row.cores === '64' || row.cores === '96') {
+          expect(row.blacksmith, `${name} ${row.cores}-core row has no Blacksmith tier`).toBe('')
+        } else {
+          expect(row.blacksmith).toContain(`blacksmith-${row.cores}vcpu`)
+        }
+      }
+    }
   })
 
   it('runs required benchmarks on standard hosted Linux independently of failover', () => {

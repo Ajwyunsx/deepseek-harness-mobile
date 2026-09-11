@@ -28,6 +28,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { DraftAttachmentId } from '../src/client/contract/input.ts'
 import { SessionInputShell } from '../src/client/input/facade.ts'
+import { $replaceDetectSpanWithText } from '../src/client/input/editor/span-map.ts'
 import { InputBar } from '../src/client/skeleton/InputBar.tsx'
 import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -58,6 +59,7 @@ function commandSource(
 ) {
   const resolve = (name: string): FakeCommand | undefined => commands.find(c => c.name === name)
   const leadingClaim = (desc: FakeCommand): CommandClaim => ({
+    name: desc.name,
     token: `/${desc.name} `,
     ...(desc.input !== undefined ? { hint: desc.input.hint } : {}),
     ...(desc.input?.attachments === true ? { attachments: true } : {}),
@@ -305,6 +307,34 @@ describe('scenario: images ride an accepting command through the real pipeline',
 })
 
 describe('scenario H: backspace breaks the token', () => {
+  it.each(['goal', '目标', 'plan', '计划', 'feedback', '反馈'])('keeps /%s claimed when its arguments and separator are deleted', async (name) => {
+    const { source } = commandSource([{ name, description: name, input: { hint: '目标内容' } }],
+      () => Promise.resolve({ kind: 'success' }))
+    const b = await scopedBench((triggers) => { triggers.registerSource(source) })
+    b.type(`/${name}`)
+    fireEvent.keyDown(b.textarea, { key: ' ', keyCode: 32 })
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    b.type(`/${name} 这是目标`)
+    for (let i = 0; i < 5; i++) {
+      act(() => {
+        b.shell.editor.update(() => {
+          const end = b.shell.snapshot.draft.length
+          $replaceDetectSpanWithText({ start: end - 1, end }, '')
+        }, { discrete: true })
+      })
+    }
+    expect(b.shell.snapshot.draft).toBe(`/${name}`)
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    expect(b.view.container.querySelector('[data-lexical-text][style*="warn-label"]')?.textContent).toBe(`/${name}`)
+    b.type(`/${name} `)
+    await act(async () => {})
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    expect(b.shell.snapshot.draft).toBe(`/${name} `)
+    expect(b.view.container.querySelector('[data-lexical-text][style*="warn-label"]')?.textContent).toBe(`/${name} `)
+    b.type(`/${name}x`)
+    expect(b.shell.snapshot.phase).toBe('plain')
+  })
+
   it('claim releases automatically; the enter after that goes through adjudication again', async () => {
     const b = await bench()
     b.type('/goal')

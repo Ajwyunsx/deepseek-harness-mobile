@@ -1,7 +1,7 @@
 /**
  * Feedback surface plugin, browser half: the Like/Dislike entry in the
  * conversation.chat.assistant-actions strip, the feedback dialog and its
- * acknowledgement toast in conversation.input.overlay, and the `/feedback`
+ * acknowledgement and failure toasts in conversation.input.overlay, and the `/feedback`
  * decoration that opens the dialog from the composer menu or a bare typed
  * command. One FeedbackSurface per Session backs every entry in that Session.
  * @module @deepseek-ai/dsh-client-ui-message-feedback/client
@@ -29,7 +29,7 @@ import { en, zh } from './locales.ts'
 
 export type {
   MessageFeedbackActionFailure, MessageFeedbackActionResult, MessageFeedbackStatus,
-  MessageFeedbackToggleResult, MessageFeedbackView,
+  MessageFeedbackView,
 } from './controller.ts'
 export type { FeedbackDialogState, FeedbackDialogTarget, FeedbackSubmit } from './dialog.ts'
 export type {
@@ -84,9 +84,8 @@ export function apply(ctx: ClientContext): void {
         hooks: { feedback },
         ensure: () => feedback.ensure(),
         current: messageId => feedback.getSnapshot().items.get(messageId),
-        toggle: (messageId, rating) => feedback.toggle(messageId, rating),
-        openDialog: (messageId) => { dialog.open({ kind: 'message', messageId }) },
-        acknowledge: () => { dialog.acknowledge() },
+        retract: (messageId, rating) => feedback.retract(messageId, rating),
+        openDialog: (messageId, rating) => { dialog.open({ kind: 'message', messageId, rating }) },
       }
     },
   }, MessageFeedbackActions))
@@ -103,6 +102,7 @@ export function apply(ctx: ClientContext): void {
         edit: (draft) => { dialog.edit(draft) },
         submit: () => dialog.submitDraft(),
         dismiss: () => { dialog.dismiss() },
+        dismissFailure: () => { dialog.dismissFailure() },
         dismissToast: (seq) => { dialog.dismissToast(seq) },
       }
     },

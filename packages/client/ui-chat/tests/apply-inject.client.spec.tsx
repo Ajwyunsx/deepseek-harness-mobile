@@ -141,6 +141,22 @@ describe('Chat inject API', () => {
     await b.runtime.dispose()
   })
 
+  it('routes sent skill previews through the viewed Session source and tolerates an absent provider', async () => {
+    const b = await bench()
+    const { injected } = b.chatViewApi(ROOT)
+    injected.openSkill('review')
+    const openReference = vi.fn(() => true)
+    const sessionOf = vi.fn(() => ({ openReference }))
+    b.runtime.ctx.provide('inputTriggers', { sessionOf } as never)
+    injected.openSkill('review')
+    expect(sessionOf).toHaveBeenCalledWith(b.runtime.sessions.scope(ROOT))
+    expect(openReference).toHaveBeenCalledWith('skill', { ref: '/review' })
+    vi.spyOn(b.runtime.sessions, 'scope').mockReturnValueOnce(undefined)
+    injected.openSkill('review')
+    expect(openReference).toHaveBeenCalledTimes(1)
+    await b.runtime.dispose()
+  })
+
   it('keeps a relative path under the Session without a cwd, and addresses a path outside the workspace absolutely', async () => {
     const b = await bench()
     const NO_CWD = 'root-2' as SessionId
