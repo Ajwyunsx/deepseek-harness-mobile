@@ -573,7 +573,6 @@ public class MainActivity extends Activity {
                     .append('\n');
 
             final String c = cookie;
-            final int st = lastStatus;
             // 同时为 localhost 与 127.0.0.1 两个 authority 各签一枚（cookie 名与
             // 签名都绑定 authority），写进 CookieManager，规避个别 WebView 对 IP
             // 字面量 cookie 的挑剔。
@@ -583,8 +582,8 @@ public class MainActivity extends Activity {
                 if (isFinishing()) return;
                 if (c != null) {
                     android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-                    cm.setCookie(root, c);
                     if (cLocal != null) cm.setCookie("http://localhost:" + port + "/", cLocal);
+                    // 异步落盘成功后再加载，避免 loadUrl 抢在 setCookie 之前
                     cm.setCookie(root, c, value -> {
                         cm.flush();
                         handler.post(() -> {
