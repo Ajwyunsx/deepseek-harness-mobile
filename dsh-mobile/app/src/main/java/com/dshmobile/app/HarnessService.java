@@ -105,8 +105,8 @@ public class HarnessService extends Service {
             final int port = prefs.getPort();
             try {
                 updateNotification("DeepSeek Harness 运行中 · 端口 " + port);
-                startSshd(prefs, log);
-                // 新进程开始前清掉上一轮的 token，避免 WebView 拿到过期 URL
+                // 先起 Web：容器 SSH 要 apt 装 openssh，网络差时可能耗时数十秒甚至
+                // 失败重试，绝不能挡在 Web 关键路径前（否则界面迟迟进不去）。
                 webAuthUrl = null;
                 process = ProotRunner.startWeb(this, port);
                 running = true;
@@ -114,6 +114,7 @@ public class HarnessService extends Service {
                 Thread pump = new Thread(() -> pumpWebOutput(p, log, port), "dsh-web-log");
                 pump.setDaemon(true);
                 pump.start();
+                startSshdAsync(prefs);
                 int code = process.waitFor();
                 running = false;
                 if (!wantRun) break;
@@ -179,6 +180,17 @@ public class HarnessService extends Service {
                 }
             }
         }
+    }
+
+    /**
+     * 后台启动 SSH：apt 装 openssh 可能很慢甚至失败，单独跑在别的线程并写自己的
+     * 日志（dsh-sshd.log），既不拖住 Web，也不把 dsh-web.log 刷满 apt 噪音。
+     */
+    private void startSshdAsync(Prefs prefs) {
+        new Thread(() -> {
+            File sshLog = new File(ProotRunner.baseDir(this), "dsh-sshd.log");
+            startSshd(prefs, sshLog);
+        }, "dsh-sshd-boot").start();
     }
 
     /** 启动容器内 sshd：老容器没有就先联网补装（失败不影响 Web 服务）。 */

@@ -61,11 +61,15 @@ public final class CookieMinter {
      * @return 可直接写入 WebView CookieManager 的 {@code name=value}；无法签发时为 null
      */
     public static String mint(Context ctx, int port) {
+        byte[] secret = findSecret(ctx);
+        return secret == null ? null : sign(secret, "127.0.0.1:" + port);
+    }
+
+    /** 在候选路径中找到第一个 32 字节签名密钥；找不到返回 null。 */
+    public static byte[] findSecret(Context ctx) {
         for (File f : candidates(ctx)) {
             byte[] secret = readSecret(f);
-            if (secret != null && secret.length == 32) {
-                return sign(secret, "127.0.0.1:" + port);
-            }
+            if (secret != null && secret.length == 32) return secret;
         }
         return null;
     }

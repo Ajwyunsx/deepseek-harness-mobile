@@ -245,6 +245,18 @@ public class MainActivity extends Activity {
                     scheduleReload();
                 }
             }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request,
+                                            android.webkit.WebResourceResponse errorResponse) {
+                // dsh 鉴权失败（401）时 WebView 直接显示
+                // ERR_HTTP_RESPONSE_CODE_FAILURE 原生错误页，onPageFinished 抓不到
+                // 401 文案；这里拦住并重签 cookie 重载。
+                if (request.isForMainFrame() && errorResponse.getStatusCode() == 401) {
+                    pageFailed = true;
+                    scheduleReload();
+                }
+            }
         });
         webView.setWebChromeClient(new WebChromeClient() {
             /**
@@ -502,11 +514,13 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 加载 dsh Web 根路径，先确保带上一枚有效会话 cookie：
-     *   1. 首选 {@link CookieMinter}：直接读容器内持久签名密钥自签 cookie；
-     *   2. 拿不到密钥时遍历 token 候选做交换（实时抓取 + 日志兜底）；
-     *   3. 都失败才裸加载根路径。
-     * 任务在后台线程完成，绝不阻塞主线程；无论成败都写一份诊断到共享存储。
+     * 加载 dsh Web 根路径。先确保能拿到一枚有效会话 cookie，并等 dsh web 真正
+     * 开始应答「已鉴权的根路径」（HTTP 200）后再加载——容器与插件树装配需要一个
+     * 过程，过早加载会撞上 401/连接失败，也就是用户看到的长时间转圈。
+     *
+     * <p>cookie 首选 {@link CookieMinter} 自签（读容器内持久签名密钥）；密钥未
+     * 落盘时宽限重试，仍拿不到则回退 token 交换/裸加载。全过程在后台线程，绝不
+     * 阻塞主线程；无论成败都写一份诊断到共享存储。
      */
     private void loadMainUrl(String authUrl) {
         loadAttempts++;
@@ -517,69 +531,66 @@ public class MainActivity extends Activity {
             dbg.append("port=").append(port).append('\n');
             for (File f : CookieMinter.candidates(MainActivity.this)) {
                 byte[] sec = CookieMinter.readSecret(f);
+                if (!f.isFile() && sec == null) continue;
                 dbg.append("cred ").append(f.getAbsolutePath())
                         .append(" exists=").append(f.isFile())
-                        .append(" size=").append(f.isFile() ? f.length() : -1)
                         .append(" secret=").append(sec == null ? "null" : (sec.length + "B"))
-                        .append(sec == null ? "" : (" b64=" + java.util.Base64.getUrlEncoder()
-                                .withoutPadding().encodeToString(sec)))
                         .append('\n');
             }
-            dbg.append("authority=127.0.0.1:").append(port).append('\n');
 
-            // 1) 自签 cookie：密钥可能尚未落盘，宽限重试
+            // 等「带 cookie 的根路径」返回 200：密钥可能尚未落盘、dsh 可能还在
+            // 装配插件树。期间持续重签 cookie 并探测，直到就绪或超时（120s）。
             String cookie = null;
-            long deadline = System.currentTimeMillis() + 15_000;
-            while (cookie == null && !stopPolling && System.currentTimeMillis() < deadline) {
-                cookie = CookieMinter.mint(MainActivity.this, port);
+            int lastStatus = -1;
+            long deadline = System.currentTimeMillis() + 120_000;
+            while (!stopPolling && System.currentTimeMillis() < deadline) {
+                if (cookie == null) cookie = CookieMinter.mint(MainActivity.this, port);
                 if (cookie == null) {
-                    try {
-                        Thread.sleep(500);
-                    } catch (InterruptedException e) {
-                        break;
+                    // 密钥还没出现：退而求其次，先探一次裸根路径
+                    lastStatus = httpStatus(root, null);
+                } else {
+                    lastStatus = httpStatus(root, cookie);
+                    if (lastStatus == 401) {
+                        // 带 cookie 仍 401：多半是服务/密钥尚未就绪，重签再试
+                        cookie = null;
                     }
                 }
-            }
-            dbg.append("mintCookie=").append(cookie != null).append('\n');
-            dbg.append("liveAuthUrl=").append(HarnessService.getWebAuthUrl()).append('\n');
-
-            // 2) token 交换回退：实时 URL + 日志里的全部候选，逐个尝试
-            java.util.List<String> tokens = new java.util.ArrayList<>();
-            if (authUrl != null && authUrl.contains("token=")) tokens.add(authUrl);
-            String live = HarnessService.getWebAuthUrl();
-            if (live != null && live.contains("token=") && !tokens.contains(live)) tokens.add(live);
-            for (String t : allTokenUrls()) if (!tokens.contains(t)) tokens.add(t);
-            dbg.append("tokenCandidates=").append(tokens.size()).append('\n');
-            if (cookie == null) {
-                for (String t : tokens) {
-                    String c = exchangeTokenForCookie(t);
-                    dbg.append("exchange ").append(t.length() > 48 ? t.substring(0, 48) + "…" : t)
-                            .append(" -> ").append(c != null).append('\n');
-                    if (c != null) {
-                        cookie = c;
-                        break;
-                    }
+                if (lastStatus == 200) break;
+                // token 交换回退：仅当完全拿不到密钥时尝试
+                if (cookie == null && authUrl != null) {
+                    String c = exchangeTokenForCookie(authUrl);
+                    if (c != null) cookie = c;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    break;
                 }
             }
-            dbg.append("finalCookie=").append(cookie != null).append('\n');
-            if (cookie != null) dbg.append("cookie=").append(cookie).append('\n');
-
-            // 关键判定：不带/带 cookie 直接请求根路径的状态码。
-            // 带 cookie 得 200 → cookie 有效，问题在 WebView 是否发送；
-            // 带 cookie 仍 401 → 自签 cookie 不被服务端接受（密钥/authority）。
-            dbg.append("rootNoCookie=").append(httpStatus(root, null)).append('\n');
-            if (cookie != null) {
-                dbg.append("rootWithCookie=").append(httpStatus(root, cookie)).append('\n');
-            }
+            dbg.append("lastStatus=").append(lastStatus)
+                    .append(" cookie=").append(cookie != null)
+                    .append(" liveAuthUrl=").append(HarnessService.getWebAuthUrl())
+                    .append('\n');
 
             final String c = cookie;
+            final int st = lastStatus;
+            // 同时为 localhost 与 127.0.0.1 两个 authority 各签一枚（cookie 名与
+            // 签名都绑定 authority），写进 CookieManager，规避个别 WebView 对 IP
+            // 字面量 cookie 的挑剔。
+            byte[] secret = CookieMinter.findSecret(MainActivity.this);
+            final String cLocal = secret == null ? null : CookieMinter.sign(secret, "localhost:" + port);
             handler.post(() -> {
                 if (isFinishing()) return;
                 if (c != null) {
                     android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
                     cm.setCookie(root, c);
-                    cm.flush();
-                    webView.loadUrl(root);
+                    if (cLocal != null) cm.setCookie("http://localhost:" + port + "/", cLocal);
+                    cm.setCookie(root, c, value -> {
+                        cm.flush();
+                        handler.post(() -> {
+                            if (!isFinishing()) webView.loadUrl(root);
+                        });
+                    });
                 } else {
                     webView.loadUrl(authUrl != null ? authUrl : root);
                 }
@@ -588,13 +599,14 @@ public class MainActivity extends Activity {
         }, "dsh-cookie-load").start();
     }
 
+
     /** 直接请求根路径并返回 HTTP 状态码（可选带上 Cookie 头）；异常返回负值。 */
     private int httpStatus(String url, String cookie) {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setConnectTimeout(3000);
-            conn.setReadTimeout(5000);
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(10000);
             conn.setInstanceFollowRedirects(false);
             if (cookie != null) conn.setRequestProperty("Cookie", cookie);
             return conn.getResponseCode();
