@@ -11,6 +11,7 @@
 - **侧栏非常驻**：左侧 rail 默认隐藏，左上角悬浮按钮或屏幕左缘右滑呼出覆盖式抽屉，点遮罩、抽屉上左滑或选中会话自动收起
 - **DeepSeek 风格**：启动屏/安装向导/设置页均为 DeepSeek 品牌风格（品牌蓝 #4D6BFE、圆角卡片）
 - **前台服务保活**：容器由前台服务持有，通知栏可查看状态/停止；Web 服务先启动，SSH 的 openssh 安装/启动在后台线程异步进行（写独立的 `dsh-sshd.log`），不拖慢首次进界面
+- **插件自愈**：dsh 的插件加载失败会拖垮整个 `dsh web`（plugin tree failed to load）。服务检测到 `failed to import loader entry <id> (<pkg>)` 时，会把这个用户插件从 profile 的 `dsh.profile.bundles` 临时摘掉再重启，保证界面能起来；插件文件保留，之后用 `dsh plugin --profile web add <兼容版本>` 重装即会重新入列。设置页的「添加插件」支持绝对路径，可直接装共享目录里的本地 tarball（如 `/home/dsh/shared/dsh-cmdgo-provider-0.4.0.tgz`）
 - **浏览器 token 鉴权**：dsh 0.1.5 起 Web 入口带一次性 token（根路径无 token/无有效 cookie 直接 401）。手机版不用去抓 `dsh web` 的 stdout——会话 cookie 的签名密钥是持久化的，存在容器内 `/home/dsh/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 记录里；App 直接读该密钥、用相同算法（HMAC-SHA256）自签一枚按 `host:port` 绑定的 cookie（127.0.0.1 与 localhost 各一枚）写入 WebView，再加载干净根路径。加载前会先等「带 cookie 的根路径」返回 HTTP 200（最多 120s）才加载，避开容器/插件树装配期；抓不到密钥时回退实时捕获 `dsh web` 的带 token URL 做一次交换。`dsh web` 以 `--no-open` 启动，避免容器内无效的浏览器拉起
 - **容器 SSH**：openssh-server 随服务自启（仅监听 127.0.0.1:8022），本机终端/Termux 直接 `ssh dsh@127.0.0.1 -p 8022`（普通用户 dsh，登录 PATH 带 node/npm；root 同密码也可登），电脑走 `adb forward`；密码首次自动生成，设置页可查看/复制/改端口
 - **命令沙箱已禁用**：容器启动时钉死 `DSH_PERMISSION_MODE=danger-full-access`（proot 里 bwrap/Landlock 基本不可用，workspace-write 会报 SANDBOX_UNAVAILABLE）；dsh 的 bash/文件写入不设围栏、不逐条询问。会话里仍可手动切回 workspace-write/read-only，但沙箱 runner 不可用时受限命令会失败

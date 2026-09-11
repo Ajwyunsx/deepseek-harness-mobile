@@ -24,12 +24,19 @@ public class HarnessService extends Service {
     private static final String CHANNEL_ID = "harness";
     private static final int NOTIF_ID = 1001;
     private static final int MAX_RESTART = 5;
+    /** dsh 插件加载失败行：命中即捕获括号里的包名。 */
+    private static final java.util.regex.Pattern BROKEN_PLUGIN =
+            java.util.regex.Pattern.compile("failed to import loader entry \\S+ \\(([^)]+)\\)");
 
     private static Process process;
     private static Process sshdProcess;
     private static boolean running;
     /** dsh web 启动时打印的带 token 认证 URL（当前进程），供 WebView 首登。 */
     private static volatile String webAuthUrl;
+    /** pump 线程本进程内检测到的加载失败插件包名（供退出后隔离）。 */
+    private volatile String brokenPlugin;
+    /** 已隔离过的插件，避免同一插件反复触发隔离-重启循环。 */
+    private final java.util.Set<String> quarantined = new java.util.HashSet<>();
 
     private ExecutorService executor;
     private PowerManager.WakeLock wakeLock;
@@ -118,6 +125,16 @@ public class HarnessService extends Service {
                 int code = process.waitFor();
                 running = false;
                 if (!wantRun) break;
+                // 插件加载失败会拖垮整个 dsh web（plugin tree failed to load）。
+                // 先把它从 profile 的 bundles 里摘掉再重启，让 UI 能起来；隔离本身
+                // 不计入重启次数，避免和普通崩溃互相挤占配额。
+                String broken = brokenPlugin;
+                brokenPlugin = null;
+                if (broken != null && quarantined.add(broken) && quarantinePlugin(broken)) {
+                    updateNotification("插件 " + broken + " 与当前 dsh 不兼容，已临时禁用并重启");
+                    Thread.sleep(1000);
+                    continue;
+                }
                 restarts++;
                 if (restarts > MAX_RESTART) {
                     updateNotification("容器多次退出，已停止（详见日志）");
@@ -169,6 +186,11 @@ public class HarnessService extends Service {
                 }
                 String auth = ProotRunner.extractAuthUrl(line, port);
                 if (auth != null) webAuthUrl = auth;
+                // dsh 0.1.5 插件加载失败会整树失败：
+                //   failed to import loader entry <id> (<pkg>): ...
+                // 记下包名，进程退出后隔离它。
+                java.util.regex.Matcher m = BROKEN_PLUGIN.matcher(line);
+                if (m.find()) brokenPlugin = m.group(1);
             }
         } catch (Exception ignored) {
             // 进程结束/管道关闭：正常退出路径
@@ -179,6 +201,44 @@ public class HarnessService extends Service {
                 } catch (Exception ignored) {
                 }
             }
+        }
+    }
+
+    /**
+     * 把加载失败的插件从 profile 的 `dsh.profile.bundles` 里摘掉（只动用户依赖，
+     * 绝不碰模板 bundle），这样 `dsh web` 能跳过它正常启动。插件文件仍保留在
+     * node_modules；用户之后用 `dsh plugin --profile web add <spec>` 重装兼容版本时，
+     * reconcile 会把它重新加回 bundles。
+     *
+     * @param pkg 失败插件包名（来自启动日志）
+     * @return 确实修改了 profile 清单才返回 true
+     */
+    private boolean quarantinePlugin(String pkg) {
+        File manifest = new File(ProotRunner.homeDir(this), ".dsh/profiles/web/package.json");
+        if (!manifest.isFile()) return false;
+        try {
+            String text = new String(java.nio.file.Files.readAllBytes(manifest.toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            org.json.JSONObject root = new org.json.JSONObject(text);
+            org.json.JSONObject deps = root.optJSONObject("dependencies");
+            if (deps == null || !deps.has(pkg)) return false;
+            org.json.JSONObject dsh = root.optJSONObject("dsh");
+            org.json.JSONObject profile = dsh == null ? null : dsh.optJSONObject("profile");
+            org.json.JSONArray bundles = profile == null ? null : profile.optJSONArray("bundles");
+            if (bundles == null) return false;
+            boolean removed = false;
+            for (int i = bundles.length() - 1; i >= 0; i--) {
+                if (pkg.equals(bundles.optString(i))) {
+                    bundles.remove(i);
+                    removed = true;
+                }
+            }
+            if (!removed) return false;
+            java.nio.file.Files.write(manifest.toPath(),
+                    root.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 

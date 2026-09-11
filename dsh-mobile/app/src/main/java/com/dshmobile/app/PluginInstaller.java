@@ -20,8 +20,12 @@ import java.util.regex.Pattern;
  */
 public final class PluginInstaller {
 
-    /** npm 包名/git/路径 spec 的宽松白名单，杜绝 shell 注入（我们不用 shell，双保险）。 */
-    private static final Pattern SPEC = Pattern.compile("^[a-zA-Z0-9@][a-zA-Z0-9._/@:+\\-~]{0,127}$");
+    /**
+     * npm 包名/git/本地路径 spec 的宽松白名单，杜绝 shell 注入（我们不用 shell，
+     * 双保险）。允许以 `/`、`.`、`~` 开头，以便安装共享目录里的本地 tarball
+     * （例如 /home/dsh/shared/dsh-cmdgo-provider-0.4.0.tgz）。
+     */
+    private static final Pattern SPEC = Pattern.compile("^[a-zA-Z0-9@/.~][a-zA-Z0-9._/@:+\\-~]{0,127}$");
     private static final long TIMEOUT_MS = 10 * 60 * 1000;
 
     private PluginInstaller() {
