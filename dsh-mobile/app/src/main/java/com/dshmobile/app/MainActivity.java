@@ -30,6 +30,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -464,39 +465,73 @@ public class MainActivity extends Activity {
     /**
      * dsh 0.1.5 起 Web 入口带 token 鉴权：进程启动时打印
      * `dsh web: http://127.0.0.1:<port>/?token=<随机值>`，根路径无 token/无
-     * 有效 cookie 直接 401。HarnessService 从 dsh web 的 stdout 实时抓取该
-     * URL（见 {@link HarnessService#getWebAuthUrl()}），此处只读内存值：
-     * 绝不回退去扫 dsh-web.log——日志跨进程重启追加，旧进程的 token 会先于
-     * 新进程被读到，拿去交换必然 401。
+     * 有效 cookie 直接 401。首选 {@link CookieMinter} 自签 cookie；此处提供
+     * 认证 URL 作为回退（HarnessService 实时抓取的优先，日志兜底）。
      *
-     * @return 当前进程带 token 的完整 URL；尚未打印时返回 {@code null}。
+     * @return 带 token 的认证 URL；没有则 {@code null}。
      */
     private String authenticatedUrl() {
         String live = HarnessService.getWebAuthUrl();
         if (live != null && live.contains("token=")) return live;
-        return null;
+        return firstTokenUrl();
+    }
+
+    /** 从 dsh web 日志里抓最后一条本端口的认证 URL（作为内存抓取的兜底）。 */
+    private String firstTokenUrl() {
+        java.util.List<String> all = allTokenUrls();
+        return all.isEmpty() ? null : all.get(all.size() - 1);
+    }
+
+    /** 收集 dsh web 日志中全部带 token 的认证 URL（按出现顺序）。 */
+    private java.util.List<String> allTokenUrls() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        File log = new File(ProotRunner.baseDir(this), "dsh-web.log");
+        if (!log.isFile()) return out;
+        String host = "127.0.0.1:" + port;
+        String alt = "localhost:" + port;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new java.io.FileInputStream(log), "UTF-8"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                String s = ProotRunner.extractAuthUrl(line, port);
+                if (s != null && (s.contains(host) || s.contains(alt))) out.add(s);
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
     }
 
     /**
      * 加载 dsh Web 根路径，先确保带上一枚有效会话 cookie：
      *   1. 首选 {@link CookieMinter}：直接读容器内持久签名密钥自签 cookie；
-     *   2. 拿不到密钥时回退 token 交换（若 HarnessService 抓到了认证 URL）；
-     *   3. 都失败才裸加载根路径（旧 cookie 可能仍有效）。
-     * 任务在后台线程完成，绝不阻塞主线程。
+     *   2. 拿不到密钥时遍历 token 候选做交换（实时抓取 + 日志兜底）；
+     *   3. 都失败才裸加载根路径。
+     * 任务在后台线程完成，绝不阻塞主线程；无论成败都写一份诊断到共享存储。
      */
     private void loadMainUrl(String authUrl) {
         loadAttempts++;
         final String root = "http://127.0.0.1:" + port + "/";
         new Thread(() -> {
-            // 服务刚应答时密钥可能还没落盘：宽限重试，避免又一次 401
+            StringBuilder dbg = new StringBuilder();
+            dbg.append("version=").append(currentVersion()).append('\n');
+            dbg.append("port=").append(port).append('\n');
+            for (File f : CookieMinter.candidates(MainActivity.this)) {
+                byte[] sec = CookieMinter.readSecret(f);
+                dbg.append("cred ").append(f.getAbsolutePath())
+                        .append(" exists=").append(f.isFile())
+                        .append(" size=").append(f.isFile() ? f.length() : -1)
+                        .append(" secret=").append(sec == null ? "null" : (sec.length + "B"))
+                        .append(sec == null ? "" : (" b64=" + java.util.Base64.getUrlEncoder()
+                                .withoutPadding().encodeToString(sec)))
+                        .append('\n');
+            }
+            dbg.append("authority=127.0.0.1:").append(port).append('\n');
+
+            // 1) 自签 cookie：密钥可能尚未落盘，宽限重试
             String cookie = null;
             long deadline = System.currentTimeMillis() + 15_000;
             while (cookie == null && !stopPolling && System.currentTimeMillis() < deadline) {
                 cookie = CookieMinter.mint(MainActivity.this, port);
-                if (cookie == null && authUrl != null) {
-                    cookie = exchangeTokenForCookie(authUrl);
-                    break;
-                }
                 if (cookie == null) {
                     try {
                         Thread.sleep(500);
@@ -505,6 +540,38 @@ public class MainActivity extends Activity {
                     }
                 }
             }
+            dbg.append("mintCookie=").append(cookie != null).append('\n');
+            dbg.append("liveAuthUrl=").append(HarnessService.getWebAuthUrl()).append('\n');
+
+            // 2) token 交换回退：实时 URL + 日志里的全部候选，逐个尝试
+            java.util.List<String> tokens = new java.util.ArrayList<>();
+            if (authUrl != null && authUrl.contains("token=")) tokens.add(authUrl);
+            String live = HarnessService.getWebAuthUrl();
+            if (live != null && live.contains("token=") && !tokens.contains(live)) tokens.add(live);
+            for (String t : allTokenUrls()) if (!tokens.contains(t)) tokens.add(t);
+            dbg.append("tokenCandidates=").append(tokens.size()).append('\n');
+            if (cookie == null) {
+                for (String t : tokens) {
+                    String c = exchangeTokenForCookie(t);
+                    dbg.append("exchange ").append(t.length() > 48 ? t.substring(0, 48) + "…" : t)
+                            .append(" -> ").append(c != null).append('\n');
+                    if (c != null) {
+                        cookie = c;
+                        break;
+                    }
+                }
+            }
+            dbg.append("finalCookie=").append(cookie != null).append('\n');
+            if (cookie != null) dbg.append("cookie=").append(cookie).append('\n');
+
+            // 关键判定：不带/带 cookie 直接请求根路径的状态码。
+            // 带 cookie 得 200 → cookie 有效，问题在 WebView 是否发送；
+            // 带 cookie 仍 401 → 自签 cookie 不被服务端接受（密钥/authority）。
+            dbg.append("rootNoCookie=").append(httpStatus(root, null)).append('\n');
+            if (cookie != null) {
+                dbg.append("rootWithCookie=").append(httpStatus(root, cookie)).append('\n');
+            }
+
             final String c = cookie;
             handler.post(() -> {
                 if (isFinishing()) return;
@@ -517,7 +584,50 @@ public class MainActivity extends Activity {
                     webView.loadUrl(authUrl != null ? authUrl : root);
                 }
             });
+            writeDiagnostic(dbg.toString());
         }, "dsh-cookie-load").start();
+    }
+
+    /** 直接请求根路径并返回 HTTP 状态码（可选带上 Cookie 头）；异常返回负值。 */
+    private int httpStatus(String url, String cookie) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(5000);
+            conn.setInstanceFollowRedirects(false);
+            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
+            return conn.getResponseCode();
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /** 把诊断写到共享存储（/sdcard/dsh-shared），便于取回定位；失败静默。 */
+    private void writeDiagnostic(String text) {
+        try {
+            File dir = ProotRunner.sharedDir();
+            if (!dir.isDirectory()) dir.mkdirs();
+            File out = new File(dir, "dsh-auth-debug.txt");
+            try (java.io.FileWriter w = new java.io.FileWriter(out, false)) {
+                w.write(text);
+                w.write("\n---- dsh-web.log tail ----\n");
+                File log = new File(ProotRunner.baseDir(this), "dsh-web.log");
+                if (log.isFile()) {
+                    java.util.List<String> lines = java.nio.file.Files.readAllLines(log.toPath());
+                    int from = Math.max(0, lines.size() - 60);
+                    for (int i = from; i < lines.size(); i++) {
+                        w.write(lines.get(i));
+                        w.write('\n');
+                    }
+                } else {
+                    w.write("(no dsh-web.log)\n");
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /**
