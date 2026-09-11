@@ -14,7 +14,7 @@ Startup latency also mattered: the off-thread `module.register()` hooks worker s
 
 ## Decision
 
-The `dsh` TUI, Web, and headless source launches run `node --import tsx/esm`: tsx's ESM-only hook owns both TypeScript transformation and tsconfig `paths` projection. The root `dsh` script uses that vector directly from the repository root; artifact generation is a separate operation under the [source-launch/build separation decision](../simplification/2026-08-12-separate-source-launch-from-build.md). The CJS hook stays off because the CLI source graph is ESM-only; measured runtime launch to the TUI banner is ~0.7s versus ~1.1s under the full tsx default and ~0.75s under the removed native chain.
+The `dsh` TUI, Web, and headless source launches run `node --import tsx/esm`: tsx's ESM-only hook owns both TypeScript transformation and tsconfig `paths` projection. The root `dsh` script uses that vector directly from the repository root; artifact generation is a separate operation under the [source-launch/build separation decision](../../archived/simplification/2026-08-12-separate-source-launch-from-build.md). The CJS hook stays off because the CLI source graph is ESM-only; measured runtime launch to the TUI banner is ~0.7s versus ~1.1s under the full tsx default and ~0.75s under the removed native chain.
 
 `scripts/tspath-loader.ts` and `apps/cli/src/tsconfig-paths-loader.ts` are deleted. With them went the loader's runtime rule of mapping a workspace import only for declared runtime dependencies — tsx applies the `paths` map unconditionally. Declaration completeness now rests on the static gates alone: `verify-cordis-config` for configured bare plugins, and workspace constraints for manifests. (That runtime rule found real bugs: `dsh-plan-mode` and `dsh-tool-jobs` imported `@deepseek-ai/dsh-llm` while declaring it only in devDependencies; since fixed.)
 
@@ -26,7 +26,7 @@ The node-compat CI matrix (Node 22.19 and 26) gains `dsh-source-launch-smoke` (`
 
 **Make the source graph erasable-only so Node 26 strip mode accepts it.** Rejected: parameter properties and value namespaces pervade vendored Cordis/cosmokit/loader/schemastery; rewriting them is unbounded churn re-applied on every vendor sync.
 
-**A repo-owned in-thread loader (`module.registerHooks()` + esbuild or `@swc/core` transform).** Rejected for now: prototypes measured ~0.45s (esbuild path untested end-to-end; SWC breaks on `vendor/hmr`'s decorator + namespace merge in both decorator modes), but it means owning transform correctness and a resolve hook that tsx already provides. Revisit only if the ~0.3s gap becomes a real cost; the profiling evidence lives in the PR discussion.
+**A repo-owned in-thread loader (`module.registerHooks()` plus an esbuild or `@swc/core` transform).** Rejected: prototypes measured about 0.45s, while the esbuild path lacked end-to-end validation and SWC failed on `vendor/hmr`'s decorator plus namespace merge in both decorator modes. This option also makes the repository own transform correctness and a resolve hook that tsx already provides. Revisit only if the measured 0.3s gap becomes a material cost.
 
 **Run built `lib/` for Node 26 and keep native for 24.** Rejected: loses the zero-build development loop on the newest Node line and mixes source and artifact planes.
 

@@ -1,15 +1,50 @@
-# e2b/ — E2B 远程运行时家族
+---
+description: "E2B 远程运行时组映射：把文件与命令工作放进一个远程 Linux 沙箱，供 E2B 家族的用户与维护者浏览。"
+kind: "package-group"
+---
+
+# packages/e2b
 
 [English](README.md) | 中文
 
-这是一个实验性提供方组合 POC，把一个文件系统／进程执行环境放进 E2B Linux 沙箱。E2B 只提供沙箱生命周期与两个基础 OS 适配器；提供方无关的消费方在其上构建更高层能力。
+## 概述
 
-| 包（package） | ctx 键 | 职责 |
+E2B 家族让 agent（智能体）在一个远程 Linux 沙箱中读取和编辑文件、运行 shell 命令并使用终端，而不是在主机上执行这些工作。文件系统工作与命令和终端执行保持分离，但两者使用同一个沙箱。现有的 shell、终端与语言服务器功能无需 E2B 专用工具即可继续工作。harness 进程、模型调用与会话状态仍在本地；沙箱是临时性的实验环境，且默认不包含在已发布的组合中。
+
+## 目录
+
+- [包](#packages)
+- [相关文档](#related-documentation)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="packages"></a>
+## 包
+
+| 包（package） | 职责 | ctx 键 |
 |---|---|---|
-| [`e2b`](e2b/README.zh.md)（`@deepseek-ai/dsh-e2b`） | `ctx.e2b` | 创建一个沙箱，准备其工作目录与运行时目录，公开共享 SDK 句柄，并在超时或资源释放时将其删除 |
-| [`fs-e2b`](fs-e2b/README.zh.md)（`@deepseek-ai/dsh-fs-e2b`） | `ctx.fs` | 通过 E2B Filesystem API 实现文件系统 seam |
-| [`subprocess-e2b`](subprocess-e2b/README.zh.md)（`@deepseek-ai/dsh-subprocess-e2b`） | `ctx.subprocess` | 通过 E2B Commands 与 PTY API 实现可执行文件查找、受管进程组与 stdio、远程 spill 文件及终端会话 |
+| [`e2b`](e2b/README.zh.md) | 承载文件操作与命令执行的共享远程 Linux 沙箱 | `ctx.e2b` |
+| [`fs-e2b`](fs-e2b/README.zh.md) | 远程沙箱内的文件读取、写入、编辑与列表 | `ctx.fs` |
+| [`subprocess-e2b`](subprocess-e2b/README.zh.md) | 远程沙箱内的 shell 命令与交互式终端 | `ctx.subprocess` |
 
-现有的 [`dsh-bash-local`](../shell/bash-local/README.zh.md)、[`dsh-terminal-bash`](../terminal/terminal-bash/README.zh.md) 和 [`dsh-lsp-stdio`](../lsp/lsp-stdio/README.zh.md) 无需 E2B 专用 fork。它们把执行环境中的所有操作委托给 `ctx.fs` 和 `ctx.subprocess`，因此挂载这两个 E2B 适配器后，它们所有涉及可变状态的工作都发生在同一个沙箱内。
+-----
 
-该边界不会迁移 harness 进程、Cordis 对象、模型调用、agent（智能体）／会话状态、会话持久化、skill（技能）、更高层协议状态或 E2B SDK 缓冲。[可移植执行世界决策](../../.agents/notes/implemented/architecture/2026-07-28-portable-execution-world-consumers.zh.md)同时界定通用组合和此 POC 边界。
+<a id="related-documentation"></a>
+## 相关文档
+
+- [可移植执行世界决策](../../.agents/notes/implemented/architecture/2026-07-28-portable-execution-world-consumers.zh.md)——执行世界为何可以在不移动 harness 的情况下迁移，以及哪些内容留在本地。
+- [子进程子系统](../../docs/subsystems/subprocess.zh.md)——子进程 seam 约定与生成的 Cordis 接口，包括 `ctx.e2b`。
+- [文件系统子系统](../../docs/subsystems/filesystem.zh.md)——文件系统 seam 约定与生成的 Cordis 接口。
+
+-----
+
+<a id="dev-note"></a>
+## 开发备注
+
+<details>
+<summary>维护者的工作上下文——点击展开</summary>
+
+无。
+
+</details>

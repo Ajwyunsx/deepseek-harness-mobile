@@ -1,7 +1,7 @@
 /**
  * jsdom slot test runtime: a real small runtime — Cordis `Context`, the
- * runtime `SlotRegistry`, and the UI renderer — assembled around
- * test-owned session/workspace doubles, so feature specs exercise
+ * renderer-owned `SlotRegistry`, the `ui-session` adapter, and the UI renderer — assembled around
+ * test-owned session/workspace doubles and a fail-loud file-upload stub, so feature specs exercise
  * declaration, registration, scope, store, inject, rendering, updates, and
  * disposal without hand-building the machinery per suite.
  *
@@ -22,13 +22,17 @@ import { act, render, within } from '@testing-library/react'
 import type { RenderResult } from '@testing-library/react'
 import type { queries } from '@testing-library/dom'
 import type { BoundFunctions } from '@testing-library/dom'
-import {
-  ConversationEventRegistry, ConversationViewRegistry, SlotRegistry,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { bindSnapshotSelector as bindRendererSnapshotSelector } from '@deepseek-ai/dsh-client-ui-renderer/src/client/bind.ts'
 import { createSlotRenderer as createRenderer } from '@deepseek-ai/dsh-client-ui-renderer/src/client/scoped-slots.tsx'
+import {
+  apply as applyUiSession, inject as uiSessionInject,
+} from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { PanelInfo } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
-  ChildrenDecl, ComposedProps, HostObservable, OwnerOf, SlotComponent, SlotMap, SlotRenderer,
+  ChildrenDecl, ComposedProps, HostObservable, OwnerOf, RenderOpts, SlotComponent, SlotMap, SlotRenderer,
   SlotRendererHost, SnapshotSelectorHook, StoreInstanceLike,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import { registerDomSnapshotSerializer } from './snapshot.ts'
@@ -36,15 +40,21 @@ import { TestSessions } from './sessions.ts'
 import { TestWorkspaces } from './workspaces.ts'
 import type { Stabilizer } from './fixtures.ts'
 
-export type { UseSession } from '@deepseek-ai/dsh-client-ui-renderer/client'
+export type { UseSession } from '@deepseek-ai/dsh-client-ui-session/client'
 export { domSnapshotSerializer, registerDomSnapshotSerializer } from './snapshot.ts'
 export { FixtureSession, TestSessions } from './sessions.ts'
 export { stubSettingsScope } from './settings-scope.ts'
 export type { StubSettingsScope } from './settings-scope.ts'
+export { scriptedSettingsRemote } from './settings-remote.ts'
+export type { ScriptedNamespace, ScriptedSettingsRemote } from './settings-remote.ts'
 export { TestWorkspaces } from './workspaces.ts'
-export { TestRemote } from './remote.ts'
-export { conversationSnapshot, workspaceListState } from './fixtures.ts'
-export type { SessionBehaviorOverrides, SessionFixture, Stabilizer } from './fixtures.ts'
+export { RemoteError, TestRemote } from './remote.ts'
+export {
+  chatSnapshot, conversationSnapshot, sessionSnapshot, workspaceSnapshot,
+} from './fixtures.ts'
+export type {
+  FixtureSnapshot, SessionBehaviorOverrides, SessionFixture, SessionFixtureSnapshot, Stabilizer,
+} from './fixtures.ts'
 export { makeTranslate } from './translate.ts'
 export { usePinnedBrowserLanguages } from './locale-env.ts'
 
@@ -103,13 +113,21 @@ export interface FeatureHandle {
   dispose(): Promise<void>
 }
 
+/** Mutable fail-loud file-upload stub installed by {@link SlotTestRuntime}. */
+export interface TestFileUpload {
+  /** Availability reported to the feature under test. */
+  available: boolean
+  /** Test-supplied upload behavior; the default rejects every call. */
+  upload: (sessionId: SessionId, ...args: unknown[]) => Promise<unknown>
+}
+
 /**
  * Owner-props cell behind the auto frame: one external store the frame
  * subscribes to, so {@link SlotTestRuntime.renderSlot} and
  * {@link SlotView.update} drive React through the standard uSES boundary.
  */
 class OwnerPropsCell {
-  private readonly owners = new Map<string, object>()
+  private readonly owners = new Map<string, { owner: object; opts: RenderOpts | undefined }>()
   private readonly listeners = new Set<() => void>()
   private version = 0
 
@@ -131,15 +149,16 @@ class OwnerPropsCell {
    * caller wraps in act).
    * @param key - slot key.
    * @param owner - owner props share.
+   * @param opts - explicit keyed or list selection for the render site.
    */
-  set(key: string, owner: object): void {
-    this.owners.set(key, owner)
+  set(key: string, owner: object, opts?: RenderOpts): void {
+    this.owners.set(key, { owner, opts })
     this.version += 1
     for (const fn of [...this.listeners]) fn()
   }
 
   /** Keys with supplied owner props, in first-supply order. */
-  entries(): readonly (readonly [string, object])[] {
+  entries(): readonly (readonly [string, { owner: object; opts: RenderOpts | undefined }])[] {
     return [...this.owners.entries()]
   }
 }
@@ -191,7 +210,7 @@ export class TestRoot {
  * batching or React act themselves.
  */
 export class SlotTestRuntime {
-  /** The runtime's Cordis root (escape hatch: extra services via `ctx.provide`, raw `ctx.plugin` mounts). */
+  /** The runtime's Cordis root for owner APIs and explicit test-only services. */
   readonly ctx: Context
   /** The production SlotRegistry mounted on {@link SlotTestRuntime.ctx}. */
   readonly slots: SlotRegistry
@@ -201,6 +220,10 @@ export class SlotTestRuntime {
   readonly sessions: TestSessions
   /** Workspaces double (list observable, recorded intent actions). */
   readonly workspaces: TestWorkspaces
+  /** Test-owned panel selection used by the framework's usePanelInfo hook. */
+  readonly panelInfo = createSnapshotStore<PanelInfo>({ activePanelId: null })
+  /** Mutable file-upload stub; replace `upload` in suites that exercise the capability. */
+  readonly fileUpload: TestFileUpload
 
   private readonly stabilizer: Stabilizer = async (fn) => {
     await act(async () => { await fn() })
@@ -214,6 +237,8 @@ export class SlotTestRuntime {
   private readonly ownerCell = new OwnerPropsCell()
   private readonly autoDeclared = new Set<string>()
   private autoRootView: RenderResult | undefined
+  private readonly disposeWorkspaceSource: () => void
+  private readonly disposePanelInfoSource: () => void
 
   private constructor(ctx: Context, slots: SlotRegistry) {
     this.ctx = ctx
@@ -221,8 +246,15 @@ export class SlotTestRuntime {
     this.root = new TestRoot(slots, this.stabilizer)
     this.sessions = new TestSessions(this.stabilizer, ctx)
     this.workspaces = new TestWorkspaces(this.stabilizer)
+    this.fileUpload = {
+      available: false,
+      upload: () => Promise.reject(new Error('client test runtime: file upload is not stubbed')),
+    }
     ctx.provide('sessions', this.sessions)
     ctx.provide('workspaces', this.workspaces)
+    ctx.provide('fileUpload', this.fileUpload as never)
+    this.disposeWorkspaceSource = slots.provideRoot({ hooks: { workspaces: this.workspaces.list } })
+    this.disposePanelInfoSource = slots.provideRoot({ hooks: { panelInfo: this.panelInfo } })
     // Capturing install: the production renderer does the rendering; the
     // wrapper only takes the host face for storeOf (no machinery copied).
     const renderer = createSlotRenderer()
@@ -244,23 +276,9 @@ export class SlotTestRuntime {
     const ctx = new Context()
     const fiber = ctx.plugin(SlotRegistry)
     await fiber.await()
-    await ctx.plugin(ConversationEventRegistry).await()
-    await ctx.plugin(ConversationViewRegistry).await()
-    return new SlotTestRuntime(ctx, ctx.get('slots') as SlotRegistry)
-  }
-
-  /**
-   * Provide an extra service the feature under test injects (e.g. a layout
-   * fake). Sugar over `ctx.provide`, typed against the Context declaration
-   * merge: for a declared service name the fake must be a subset of that
-   * service's outward face (Partial — supply only what the feature calls),
-   * so a production face change breaks the fake at compile time. Undeclared
-   * names stay unchecked (ad-hoc test services).
-   * @param name - service name.
-   * @param value - service implementation (test double).
-   */
-  provide<K extends string>(name: K, value: K extends keyof Context ? Partial<Context[K]> : unknown): void {
-    this.ctx.provide(name, value)
+    const runtime = new SlotTestRuntime(ctx, ctx.get('slots') as SlotRegistry)
+    await ctx.plugin({ inject: [...uiSessionInject], apply: applyUiSession }).await()
+    return runtime
   }
 
   /**
@@ -293,6 +311,16 @@ export class SlotTestRuntime {
     return handle
   }
 
+  /** Release the default Workspace hook before mounting its production owner. */
+  releaseWorkspaceSource(): void {
+    this.disposeWorkspaceSource()
+  }
+
+  /** Release the default panel hook before mounting the production Layout owner. */
+  releasePanelInfoSource(): void {
+    this.disposePanelInfoSource()
+  }
+
   /**
    * Render the root slot tree through the ctx-level entry (the shell's own
    * entry point): `ctx.slots.renderSlot('root', {})` under Testing Library.
@@ -317,13 +345,13 @@ export class SlotTestRuntime {
   async declare(children: ChildrenDecl): Promise<void> {
     for (const key of Object.keys(children)) this.autoDeclared.add(key)
     const cell = this.ownerCell
-    const AutoFrame = (props: { renderSlot: (key: string, owner: object) => ReactNode }) => {
+    const AutoFrame = (props: { renderSlot: (key: string, owner: object, opts?: RenderOpts) => ReactNode }) => {
       useSyncExternalStore(cell.subscribe, cell.getVersion)
       // Keyed Fragments only: the renderer's outlet anchor is the one
       // `[data-slot]` element — the frame adding its own would nest
       // duplicate anchors under the same key.
-      return createElement(Fragment, null, cell.entries().map(([key, owner]) =>
-        createElement(Fragment, { key }, props.renderSlot(key, owner))))
+      return createElement(Fragment, null, cell.entries().map(([key, { owner, opts }]) =>
+        createElement(Fragment, { key }, props.renderSlot(key, owner, opts))))
     }
     await this.root.declare(children as never, AutoFrame as never)
   }
@@ -336,16 +364,17 @@ export class SlotTestRuntime {
    * slot of the same tree.
    * @param key - a key declared through {@link SlotTestRuntime.declare}.
    * @param owner - owner props share for the render site.
+   * @param opts - explicit keyed or list selection; retained by view updates.
    * @returns the slot-local view (snapshot container, scoped queries, owner updates).
    */
-  renderSlot<K extends keyof SlotMap & string>(key: K, owner: OwnerOf<K>): SlotView<K> {
+  renderSlot<K extends keyof SlotMap & string>(key: K, owner: OwnerOf<K>, opts?: RenderOpts): SlotView<K> {
     if (!this.autoDeclared.has(key)) {
       throw new Error(`renderSlot('${key}') without declare() — declare the key first (or use root.declare for a custom frame)`)
     }
     const install = (next: object): void => {
       // Synchronous cell write inside act: the frame re-renders through uSES.
       act(() => {
-        this.ownerCell.set(key, next)
+        this.ownerCell.set(key, next, opts)
       })
     }
     install(owner)
@@ -372,7 +401,13 @@ export class SlotTestRuntime {
     }
     const entry = this.host.entriesOf(key)[0]
     if (entry === undefined) throw new Error(`storeOf('${key}'): no registration on the ledger`)
-    const instance = this.host.storeOf(entry, scopeKey)
+    const scopeBinding = scopeKey === undefined
+      ? undefined
+      : this.host.scope('session')?.resolve(scopeKey)
+    if (scopeKey !== undefined && scopeBinding === undefined) {
+      throw new Error(`storeOf('${key}'): no live Session binding for '${scopeKey}'`)
+    }
+    const instance = this.host.storeOf(entry, scopeBinding)
     if (instance === undefined) throw new Error(`storeOf('${key}'): the entry declares no store`)
     return instance
   }
@@ -388,7 +423,7 @@ export class SlotTestRuntime {
 
   /**
    * Tear down: unmount React trees first, then dispose feature fibers, the
-   * root registration, minted session scopes, and persisted test state.
+   * root registration and standard sources, minted session scopes, and persisted test state.
    * Idempotent.
    * @returns completion of the teardown.
    */
@@ -399,6 +434,8 @@ export class SlotTestRuntime {
     for (const view of this.views.splice(0)) view.unmount()
     for (const handle of this.handles.splice(0)) await handle.dispose()
     this.root.release()
+    this.disposeWorkspaceSource()
+    this.disposePanelInfoSource()
     await this.sessions.disposeScopes()
     localStorage.clear()
   }

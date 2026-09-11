@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { LAUNCHER_FAILURE_EXIT } from '@deepseek-ai/node-addon-landlock-run'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { LAUNCHER_FAILURE_EXIT } from '@deepseek-ai/node-addon-system/landlock-run'
 import { SANDBOX_UNAVAILABLE, SandboxUnavailableError } from '@deepseek-ai/dsh-sandbox'
 import { LocalSandboxProvider } from '@deepseek-ai/dsh-sandbox-local'
 import { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
@@ -51,6 +52,7 @@ ${fatalBranch}exec "$@"
 async function setup(fatalExit?: number): Promise<SandboxBashExecutor> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSandboxProvider, {})
   const sandbox = ctx.sandbox as LocalSandboxProvider
   sandbox.internals = {
@@ -68,6 +70,7 @@ async function setup(fatalExit?: number): Promise<SandboxBashExecutor> {
 async function setupConfiguredRunner(runner: string): Promise<SandboxBashExecutor> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSandboxProvider, {
     runnerCommand: [runner],
     runnerFailureSignatures: ['configured-runner: fatal'],
@@ -97,7 +100,7 @@ describe('partial Landlock runner-failure classification', () => {
     const task = bash.start(bash.resolve({ command: 'true' }))
     await task.done
     expect(task.status).toBe('killed')
-    expect(task.readOutput().delta).toContain(`spawn failed: Error: spawn ${runner}`)
+    expect(task.readOutput().delta).toContain(`subprocess failed before reporting an outcome: Error: spawn ${runner}`)
     expect(task.sandbox).toEqual({
       mode: 'read-only',
       denied: false,
@@ -131,7 +134,7 @@ describe('partial Landlock runner-failure classification', () => {
       const task = bash.start(bash.resolve(request))
       await task.done
       expect(task.status).toBe('killed')
-      expect(task.readOutput().delta).toContain(`spawn failed: Error: spawn ${runner} ENOENT`)
+      expect(task.readOutput().delta).toContain(`subprocess failed before reporting an outcome: Error: spawn ${runner} ENOENT`)
       expect(task.sandbox).toEqual({
         mode: 'read-only',
         denied: false,
@@ -185,7 +188,7 @@ describe('partial Landlock runner-failure classification', () => {
       const output = background.readOutput().delta
       expect(output.startsWith('[stderr]\n')).toBe(true)
       expect(output.length).toBeGreaterThan('[stderr]\n'.length)
-      expect(output).not.toContain('spawn failed:')
+      expect(output).not.toContain('subprocess failed before reporting an outcome:')
     }
 
     const accounting = (bash as unknown as { processFacts: Map<unknown, unknown> }).processFacts

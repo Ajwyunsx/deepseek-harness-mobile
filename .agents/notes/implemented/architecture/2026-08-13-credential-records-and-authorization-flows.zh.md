@@ -8,7 +8,7 @@ Status: implemented
 
 harness 的凭据平面只能表达一种机密：藏在某个环境变量名之后的值。`CredentialRef` 是一个 POSIX 标识符，解析时按进程环境、受管文件、`.env` 回退分层，每个消费方按操作读取。这恰好覆盖 API key，此外什么都不覆盖。
 
-有些凭据不是"可以让部署方去存"的值。它们是被**取得**的——与人对话：对方打开页面、批准账号、把码粘回来——产出的是一份带 refresh 半边、会在用户背后轮换的 token 文档。pi-ai 直接建模了这一点（`Credential = ApiKeyCredential | OAuthCredential`、由应用拥有的 `CredentialStore`、`Models.login()`），而 harness 无处安放其中任何一项。`PiAiAdapter` 用不带参数的 `createModels()` 构造集合，于是那个 store 就是 pi-ai 的内存默认实现：每次启动为空，每次配置变更被丢弃。只以 OAuth 认证的 `openai-codex` 因此每个请求都以 `Provider is not configured` 失败——[被目录withheld](../bug-fix/2026-08-13-oauth-only-providers-withheld.zh.md) 作为发布前修复，它移除了错误的供给，但没有补上能力。
+有些凭据不是"可以让部署方去存"的值。它们是被**取得**的——与人对话：对方打开页面、批准账号、把码粘回来——产出的是一份带 refresh 半边、会在用户背后轮换的 token 文档。pi-ai 直接建模了这一点（`Credential = ApiKeyCredential | OAuthCredential`、由应用拥有的 `CredentialStore`、`Models.login()`），而 harness 无处安放其中任何一项。`PiAiAdapter` 用不带参数的 `createModels()` 构造集合，于是那个 store 就是 pi-ai 的内存默认实现：每次启动为空，每次配置变更被丢弃。只以 OAuth 认证的 `openai-codex` 因此每个请求都以 `Provider is not configured` 失败——[被目录withheld](../../archived/bug-fix/2026-08-13-oauth-only-providers-withheld.md) 作为发布前修复，它移除了错误的供给，但没有补上能力。
 
 同一处缺失还带来另外两个缺口。提供方自带的凭据发现是对着裸进程环境跑的，因此凭据 seam 保管的密钥对它不可见，本地凭据文件更是从未被查找过。而登录没有任何界面可以发起，因为 harness 里没有任何东西能代替插件向人发问。
 
@@ -53,7 +53,7 @@ seam 的边缘与写入路径同一纪律。prompt 被拒是结果而非故障�
 
 `.credentials.yaml` 增加了版本与两个分区。启动时会把能精确识别的发布前扁平布局原地升级——全字符串的扁平 mapping 在写锁下逐字下沉到 `refs:` 之下——因为早期内测构建经模型页面存下的密钥必须在布局变更后继续可用，不能要求手工编辑，也不能让模型请求失败。识别器无法证明自己理解的扁平形态仍被指名拒绝，迁移办法写在报错信息里；解析器本身始终只读一种布局，迁移步骤将随发布前立场在首个正式版本时移除。仓库中所有写扁平文档的 fixture 都已改写；llm 各套件的 fixture 被记录改动本身漏掉了，在此补上。
 
-`openai-codex` 回到提供方选择器与 Models 页目录。凡是自带登录的已安装提供方都会得到登录入口，而今天这是全部 38 个——31 个经 pi-ai 自己的提示收取密钥，6 个在此之外还提供订阅登录，Codex 只提供订阅登录。
+`openai-codex` 回到提供方选择器与 Models 页目录。全部 38 个已安装提供方都提供登录入口：31 个经 pi-ai 自己的提示收取密钥，6 个在此之外还提供订阅登录，Codex 只提供订阅登录。
 
 尚未包含的是界面：把 notice 与 prompt 送到浏览器的 wire 契约，以及 Models 页上发起登录的控件。在那之前，flow 只能在进程内触达，部署方仍然通过在设置表单里输入密钥来配置。
 
@@ -65,4 +65,4 @@ seam 自己的套件钉住它拥有的生命周期：单飞的拒绝与释放、
 
 `llm-pi-ai` 针对一份真实的 `$DSH_HOME` 文档覆盖三处翻译——逐字段的 api-key 凭据、连 refresh 半边一起原样保存的 OAuth 凭据、按 scope 跳过的他插件记录，以及没有凭据服务时的写入拒绝——外加每一个 `AuthEvent` 与 `AuthPrompt` 成员的重述；`Models.login()` 在集合边界处被 mock，因为真实登录会打开浏览器。两个真实组合测试分别在挂载与不挂载授权 seam 的情况下启动插件。
 
-`models-settings` 与 `onboarding-usable-provider` 两条 web e2e golden 恰好收回了被扣留时失去的那一行 `openai-codex` 选项——这是本次改动今天在装配后的应用上造成的全部差异，因为 Models 页还没有可录制的登录控件。
+`models-settings` 与 `onboarding-usable-provider` 两条 web e2e golden 恰好收回了被扣留时失去的那一行 `openai-codex` 选项——这是本决策记录的唯一装配后应用差异，因为 Models 页还没有可录制的登录控件。

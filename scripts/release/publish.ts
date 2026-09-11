@@ -93,15 +93,19 @@ function registryState(name: string, version: string): RegistryState {
  * @param tarball - absolute tarball path.
  * @param name - package name the tarball declares.
  * @param version - package version the tarball declares.
+ * @param distTag - explicit npm dist-tag, or undefined for npm's `latest` default.
  */
-async function publishTarball(tarball: string, name: string, version: string): Promise<void> {
-  // A prerelease version never takes the latest dist-tag.
-  const tagArgs = version.includes('-') ? ['--tag', 'next'] : []
+async function publishTarball(
+  tarball: string,
+  name: string,
+  version: string,
+  distTag: string | undefined,
+): Promise<void> {
+  const tagArgs = distTag === undefined ? [] : ['--tag', distTag]
   for (let tries = 1; tries <= PUBLISH_ATTEMPTS; tries += 1) {
-    // No --access: the sequences do not share one access level, so a
-    // command-line flag could not serve both and would override the manifest
-    // that does. Each packed manifest decides, and
-    // check-workspace-constraints holds every manifest to its sequence's level.
+    // No --access: every release member declares its own publishConfig, and
+    // a command-line flag would override it. check-workspace-constraints
+    // requires a public access level on every release member.
     const result = attemptEchoed('npm', ['publish', tarball, ...tagArgs])
     const output = `${result.stdout}${result.stderr}`
     if (result.status === 0) return
@@ -164,7 +168,7 @@ async function main(): Promise<void> {
     // Space out the writes: the gap belongs between publishes, so a run that
     // only skips does not wait at all.
     if (published > 0) await sleep(PUBLISH_SPACING_MS)
-    await publishTarball(tarball, name, version)
+    await publishTarball(tarball, name, version, family.distTagForVersion(version))
     console.log(`release publish: ${progress} ${name}@${version} published`)
     published += 1
   }

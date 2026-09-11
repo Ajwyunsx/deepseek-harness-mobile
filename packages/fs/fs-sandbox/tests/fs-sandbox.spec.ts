@@ -11,14 +11,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join, parse } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { FsError, FsTargetKey } from '@deepseek-ai/dsh-fs'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
+import { assertWorkspaceOutsideTemp, outsideTempWorkspaceParent } from '../../../../scripts/snapshot-workspace-parent.ts'
 
 let base: string
 let workspace: string
@@ -29,18 +31,18 @@ let fiber: Awaited<ReturnType<Context['plugin']>>
 
 async function boot(mode: SandboxMode): Promise<void> {
   ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, { mode, workspaceRoot: workspace })
   fiber = await ctx.plugin(SandboxedFileSystem, { cwd: workspace })
   fs = ctx.fs as SandboxedFileSystem
 }
 
-beforeEach(async () => {
-  // Base under HOME, deliberately NOT tmpdir: `workspace-write` grants /tmp and
-  // os.tmpdir() (parity with the bash runner), so an "outside" dir under tmpdir
-  // would be legitimately writable. Sibling dirs under HOME are outside every
-  // grant, so containment failures are real denials. (The bwrap e2e roots its
-  // workspaces under HOME for the same reason.)
-  base = await mkdtemp(join(homedir(), '.dsh-fssbx-'))
+beforeEach(async ({ onTestFinished }) => {
+  // Both siblings must be outside automatic temp grants for containment denials to be meaningful.
+  const directory = await mkdtemp(join(outsideTempWorkspaceParent(), '.dsh-fssbx-'))
+  onTestFinished(async () => { await rm(directory, { recursive: true, force: true }) })
+  base = directory
+  assertWorkspaceOutsideTemp(base)
   workspace = join(base, 'ws')
   outside = join(base, 'out')
   await mkdir(workspace)
@@ -48,7 +50,6 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   await fiber?.dispose()
-  await rm(base, { recursive: true, force: true })
 })
 
 /** Resolve a path through the backend and return its target. */
@@ -98,9 +99,14 @@ describe('workspace-write containment', () => {
   })
 
   it('a write to the platform temp area lands (parity with the bash runner grant)', async () => {
-    const path = join(await mkdtemp(join(tmpdir(), 'dsh-fssbx-tmp-')), 'temp.txt')
-    await fs.writeText(await target(path), 'temp')
-    expect(await readFile(path, 'utf8')).toBe('temp')
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-fssbx-tmp-'))
+    try {
+      const path = join(dir, 'temp.txt')
+      await fs.writeText(await target(path), 'temp')
+      expect(await readFile(path, 'utf8')).toBe('temp')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('an absolute path outside the workspace is denied, no file created', async () => {
@@ -171,11 +177,12 @@ describe('workspace-write with the filesystem root as the workspace (a root endi
     // A degenerate but valid config: the filesystem root containing the target.
     // It exercises the separator-suffixed-root branch on POSIX and Windows.
     const rootCtx = new Context()
+    await rootCtx.plugin(SessionProjectionRegistry)
     await rootCtx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: parse(base).root })
     const rootFiber = await rootCtx.plugin(SandboxedFileSystem, { cwd: workspace })
     const rootFs = rootCtx.fs as SandboxedFileSystem
     try {
-      const path = join(base, 'anywhere.txt') // under HOME, outside temp — allowed only via the filesystem root
+      const path = join(base, 'anywhere.txt') // outside temp — allowed only via the filesystem root
       await rootFs.writeText(await rootFs.resolve(path), 'anywhere')
       expect(await readFile(path, 'utf8')).toBe('anywhere')
     } finally {

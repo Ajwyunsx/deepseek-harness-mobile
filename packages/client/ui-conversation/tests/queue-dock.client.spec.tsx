@@ -1,26 +1,33 @@
 // @vitest-environment jsdom
 /**
  * QueueDock rendering and operations: authoritative rows, inline editing,
- * collapse state, removal, strict steering, failure notices, and live retirement.
+ * collapse state, removal, QueueDock Steer, failure notices, and live retirement.
  */
+import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
-import {
-  EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS,
-} from '@deepseek-ai/dsh-client-runtime/client'
 import type {
-  ConversationSnapshot, QueuedMessage, SessionId, SessionListState,
-} from '@deepseek-ai/dsh-client-runtime/client'
+  QueuedMessage, SessionListState, SessionSnapshot,
+} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import {
+  bindSnapshotSelector, conversationSnapshot, makeTranslate,
+} from '@deepseek-ai/dsh-client-test-runtime'
+import type { SessionPendingInteractionSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { QueueItemId } from '../src/client/contract/queue.ts'
-import type { InputState } from '../src/client/input/contract.ts'
+import type { InputState } from '../src/client/contract/input.ts'
 import { zh } from '../src/client/locales.ts'
 import { QueueDock, queueDockEntry, type QueueDockInjected, type QueueDockProps } from '../src/client/queue/QueueDock.tsx'
 
+// Every session-scope fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
+const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined })) as GlobalStandardProps['useResource']
+
 afterEach(cleanup)
+
 
 const SID = 's1' as SessionId
 const iid = (id: string): QueueItemId => id as QueueItemId
@@ -33,20 +40,20 @@ function row(id: string, text: string | null, preview = text ?? '[image]'): Queu
   }
 }
 
-function snapshotWith(queue: QueuedMessage[]): ConversationSnapshot {
+function snapshotWith(queue: QueuedMessage[]): SessionSnapshot {
   return {
-    sessionId: SID, views: EMPTY_CONVERSATION_VIEWS, chat: EMPTY_CHAT_SNAPSHOT,
-    nodes: [], turnTimings: new Map(), turnEnds: new Map(), partial: null, runningCalls: [],
-    pending: [], queue, running: true, composerPhase: 'active', removed: false, openState: 'open', openError: null,
-    hasMore: false, loadingOlder: false, promptError: null, blank: false, subagent: null, lastAgentError: null,
+    sessionId: SID, queue, running: true, removed: false, openState: 'open', openError: null,
+    hasMore: false, loadingOlder: false, promptError: null, blank: false, subagent: null,
+    pendingSubmissions: [],
+    lastAgentError: null, promptAttempted: true, awaitingFirstTurn: false,
   }
 }
 
 /** Minimal live source backing the useSession stub. */
-function liveSession(initial: ConversationSnapshot) {
+function liveSession(initial: SessionSnapshot) {
   let snapshot = initial
   const listeners = new Set<() => void>()
-  const useSession: SnapshotSelectorHook<ConversationSnapshot> = selector =>
+  const useSession: SnapshotSelectorHook<SessionSnapshot> = selector =>
     useSyncExternalStore(
       (listener) => {
         listeners.add(listener)
@@ -56,33 +63,56 @@ function liveSession(initial: ConversationSnapshot) {
     )
   return {
     useSession,
-    push(next: ConversationSnapshot): void {
+    push(next: SessionSnapshot): void {
       snapshot = next
       for (const listener of [...listeners]) listener()
     },
   }
 }
 
-/** InputZone owner stub (the dock reads useSession only; the zone fields satisfy the owner share). */
-const INPUT_STATE: InputState = { draft: '', imageIds: [], draftRev: 0, phase: 'plain', occurrences: [], queue: [] }
+const INPUT_STATE: InputState = { draft: '', attachmentIds: [], draftRev: 0, phase: 'plain', occurrences: [], queue: [] }
 
-// Standard locale seat stub mirroring the real ns → common → key chain.
 const t: QueueDockProps['t'] = makeTranslate(zh, commonZh)
+const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({ activePanelId: null })
 
-function kitFor(snapshot: ConversationSnapshot, injected: Partial<QueueDockInjected> = {}) {
+function kitFor(snapshot: SessionSnapshot, injected: Partial<QueueDockInjected> = {}) {
   return {
     sessionId: SID,
     t,
+    usePanelInfo,
     useSessions: (() => { throw new Error('unused') }) as unknown as SnapshotSelectorHook<SessionListState>,
+    useResource,
+    useSessionPendingInteraction: bindSnapshotSelector(
+      createSnapshotStore<SessionPendingInteractionSnapshot>(new Map()),
+    ),
     useWorkspaces: (() => { throw new Error('unused') }) as never,
     useProjection: (() => undefined) as never,
+    useConversation: bindSnapshotSelector(createSnapshotStore(conversationSnapshot())),
+    useChat: (() => { throw new Error('unused') }) as QueueDockProps['useChat'],
+    useTrajectory: (() => { throw new Error('unused') }) as QueueDockProps['useTrajectory'],
     useInput: (() => { throw new Error('unused') }) as never,
     inputActions: { setDraft: () => {}, submit: () => {} } as never,
     session: snapshot,
     input: INPUT_STATE,
     updateQueue: vi.fn(() => Promise.resolve()),
     notify: vi.fn(),
+    loadImage: vi.fn(() => Promise.resolve('blob:unused')),
     ...injected,
+  }
+}
+
+/** One queued row carrying a durable image reference (plus optional leading text). */
+function imageRow(id: string, refId: string, text = ''): QueuedMessage {
+  return {
+    id: iid(id), messageId: `message-${id}` as never, placement: 'queued',
+    content: [
+      ...text === '' ? [] : [{ type: 'text' as const, text }],
+      {
+        type: 'image',
+        attachment: { attachmentId: refId, mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+      } as never,
+    ],
+    preview: text, text: null,
   }
 }
 
@@ -92,6 +122,117 @@ describe('QueueDock', () => {
     const source = liveSession(snap)
     const { container } = render(<QueueDock {...kitFor(snap)} useSession={source.useSession} />)
     expect(container.innerHTML).toBe('')
+  })
+
+  it('renders a queued local echo in the dock and hands off by rpcId', () => {
+    const pending = {
+      ...snapshotWith([]),
+      pendingSubmissions: [{
+        requestId: 'req-local-queue' as never,
+        placement: 'queued' as const,
+        time: 1,
+        text: '等待上传',
+        attachments: [
+          {
+            type: 'image' as const,
+            value: { previewUrl: 'blob:queue-preview', name: 'queue.png' },
+          },
+          {
+            type: 'file' as const,
+            value: {
+              attachmentId: 'file-local' as never,
+              name: 'notes.txt',
+              bytes: 2447 * 1024 * 1024,
+            },
+          },
+        ],
+      }],
+    }
+    const source = liveSession(pending)
+    const props = kitFor(pending)
+    const view = render(<QueueDock {...props} useSession={source.useSession} />)
+    expect(view.getByText('等待上传').closest('[data-submission-echo]')).not.toBeNull()
+    expect(view.getByRole('img', { name: '排队消息图片' }).getAttribute('src')).toBe('blob:queue-preview')
+    expect(view.getByLabelText('排队文件 notes.txt').textContent).toContain('2.4GB')
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    for (const name of ['编辑排队消息', '删除排队消息', '插话发送']) {
+      const button = view.getByRole('button', { name }) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      fireEvent.click(button)
+    }
+    expect(props.updateQueue).not.toHaveBeenCalled()
+    expect(view.queryByRole('textbox')).toBeNull()
+
+    act(() => {
+      source.push({
+        ...pending,
+        queue: [{ ...row('accepted', '等待上传'), rpcId: 'req-local-queue' as never }],
+      })
+    })
+    expect(view.getAllByText('等待上传')).toHaveLength(1)
+    expect(view.container.querySelector('[data-submission-echo]')).toBeNull()
+    expect(view.queryByRole('status')).toBeNull()
+    for (const name of ['编辑排队消息', '删除排队消息', '插话发送']) {
+      expect((view.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(false)
+    }
+    fireEvent.click(view.getByRole('button', { name: '编辑排队消息' }))
+    expect((view.getByRole('textbox') as HTMLInputElement).value).toBe('等待上传')
+  })
+
+  it('loads the durable thumbnail after replacing a local image echo', async () => {
+    const pending: SessionSnapshot = {
+      ...snapshotWith([]),
+      pendingSubmissions: [{
+        requestId: 'req-image' as never, placement: 'queued', time: 1,
+        text: 'queued image',
+        attachments: [{
+          type: 'image', value: { previewUrl: 'blob:local-preview', name: 'queue.png' },
+        }],
+      }],
+    }
+    const image = Promise.withResolvers<string>()
+    const loadImage = vi.fn(() => image.promise)
+    const source = liveSession(pending)
+    const view = render(<QueueDock {...kitFor(pending, { loadImage })} useSession={source.useSession} />)
+    expect(view.getByRole('img', { name: '排队消息图片' }).getAttribute('src')).toBe('blob:local-preview')
+    expect(loadImage).not.toHaveBeenCalled()
+
+    act(() => {
+      source.push({
+        ...pending,
+        queue: [{ ...imageRow('accepted-image', 'durable-image', 'queued image'), rpcId: 'req-image' as never }],
+      })
+    })
+    expect(view.container.querySelector('[data-submission-echo]')).toBeNull()
+    expect(view.getByText('queued image')).toBeTruthy()
+    expect(view.getByRole('button', { name: '删除排队消息' })).toHaveProperty('disabled', false)
+    expect(view.queryByRole('img', { name: '排队消息图片' })).toBeNull()
+    expect(loadImage).toHaveBeenCalledOnce()
+
+    await act(async () => { image.resolve('blob:durable-image'); await image.promise })
+    const thumbnail = view.getByRole('img', { name: '排队消息图片' })
+    expect(thumbnail.getAttribute('src')).toBe('blob:durable-image')
+    expect(thumbnail.closest('li')?.hasAttribute('data-submission-echo')).toBe(false)
+  })
+
+  it('keeps sending status visible while a queue containing local submissions is collapsed', () => {
+    const pending: SessionSnapshot = {
+      ...snapshotWith([row('accepted', '已排队')]),
+      pendingSubmissions: [{
+        requestId: 'req-waiting' as never, placement: 'queued', time: 1,
+        text: '等待发送', attachments: [],
+      }],
+    }
+    const source = liveSession(pending)
+    const view = render(<QueueDock {...kitFor(pending)} useSession={source.useSession} />)
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    const header = view.getByRole('button', { name: /2 条排队消息\s*发送中…/ })
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(header)
+    expect(view.getAllByRole('status')).toHaveLength(1)
+    expect(view.getByRole('status').closest('[data-submission-echo]')).not.toBeNull()
+    act(() => { source.push(snapshotWith([row('accepted', '已排队')])) })
+    expect(view.queryByRole('status')).toBeNull()
   })
 
   it('leaves pending steering to the conversation flow', () => {
@@ -218,6 +359,81 @@ describe('QueueDock', () => {
       .toBe('包含非文本内容，暂不支持编辑')
   })
 
+  it('renders queued image thumbnails from durable references beside the text preview', async () => {
+    const loadImage = vi.fn(() => Promise.resolve('blob:thumb-1'))
+    const snap = snapshotWith([imageRow('i-img', 'att-9', '带图消息')])
+    const source = liveSession(snap)
+    const { container } = render(
+      <QueueDock {...kitFor(snap, { loadImage })} useSession={source.useSession} />,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('img')?.getAttribute('src')).toBe('blob:thumb-1')
+    })
+    expect(loadImage).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: 'att-9' }))
+    expect(container.querySelector('img')?.getAttribute('alt')).toBe('排队消息图片')
+    expect(container.querySelector('li')?.textContent).toBe('带图消息')
+  })
+
+  it('renders durable files and images in their original queue order', async () => {
+    const loadImage = vi.fn(() => Promise.resolve('blob:mixed'))
+    const mixed: QueuedMessage = {
+      id: iid('i-mixed'), messageId: 'message-i-mixed' as never, placement: 'queued',
+      content: [
+        {
+          type: 'file',
+          attachment: { attachmentId: 'file-durable' as never, name: 'report.csv', bytes: 427 },
+        },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: 'image-durable' as never,
+            mediaType: 'image/png', bytes: 1, width: 1, height: 1,
+          },
+        },
+      ],
+      preview: '', text: null,
+    }
+    const snap = snapshotWith([mixed])
+    const source = liveSession(snap)
+    const view = render(<QueueDock {...kitFor(snap, { loadImage })} useSession={source.useSession} />)
+    await waitFor(() => { expect(view.container.querySelector('img')).not.toBeNull() })
+    const group = view.getByLabelText('排队文件 report.csv').parentElement
+    expect(group?.children).toHaveLength(2)
+    expect(group?.children[0]?.getAttribute('aria-label')).toBe('排队文件 report.csv')
+    expect(group?.children[1]?.tagName).toBe('IMG')
+  })
+
+  it('keeps the empty thumbnail placeholder when the image read fails', async () => {
+    const loadImage = vi.fn(() => Promise.reject(new Error('read denied')))
+    const snap = snapshotWith([imageRow('i-broken', 'att-x')])
+    const source = liveSession(snap)
+    const { container } = render(
+      <QueueDock {...kitFor(snap, { loadImage })} useSession={source.useSession} />,
+    )
+
+    await act(async () => { await Promise.resolve() })
+    expect(loadImage).toHaveBeenCalled()
+    expect(container.querySelector('img')).toBeNull()
+  })
+
+  it('ignores a thumbnail resolution landing after unmount', async () => {
+    let resolveUrl: ((url: string) => void) | undefined
+    const loadImage = vi.fn(() => new Promise<string>((resolve) => { resolveUrl = resolve }))
+    const snap = snapshotWith([imageRow('i-late', 'att-late')])
+    const source = liveSession(snap)
+    const { unmount } = render(
+      <QueueDock {...kitFor(snap, { loadImage })} useSession={source.useSession} />,
+    )
+
+    unmount()
+    await act(async () => {
+      resolveUrl?.('blob:late')
+      await Promise.resolve()
+    })
+    expect(loadImage).toHaveBeenCalledTimes(1)
+  })
+
   it('edits text inline with save and cancel controls, then saves with the same item identity', async () => {
     const snap = snapshotWith([row('i-edit', 'before')])
     const source = liveSession(snap)
@@ -314,7 +530,7 @@ describe('QueueDock', () => {
     expect(rendered.getByLabelText('插话发送').getAttribute('title')).toBe('仅运行中可插话发送')
   })
 
-  it('renders a session-backed subagent Queue without unsupported actions', () => {
+  it('renders ordinary queue actions for a continuable child', () => {
     const snap = {
       ...snapshotWith([row('i-subagent', 'pending child follow-up')]),
       subagent: {
@@ -322,6 +538,29 @@ describe('QueueDock', () => {
           parentSessionId: 'parent' as SessionId,
           childSessionId: SID,
           mode: 'continuable' as const,
+        },
+        parentAvailable: false,
+      },
+    }
+    const source = liveSession(snap)
+    const view = render(
+      <QueueDock {...kitFor(snap)} useSession={source.useSession} />,
+    )
+
+    expect(view.getByText('pending child follow-up')).toBeTruthy()
+    expect(view.getByLabelText('编辑排队消息')).toBeTruthy()
+    expect(view.getByLabelText('删除排队消息')).toBeTruthy()
+    expect(view.getByLabelText('插话发送')).toBeTruthy()
+  })
+
+  it('keeps a one-shot child Queue read-only', () => {
+    const snap = {
+      ...snapshotWith([row('i-subagent', 'pending child follow-up')]),
+      subagent: {
+        address: {
+          parentSessionId: 'parent' as SessionId,
+          childSessionId: SID,
+          mode: 'one-shot' as const,
         },
         parentAvailable: true,
       },
@@ -383,7 +622,7 @@ describe('QueueDock', () => {
 
   it('registers as the terminal composer-context entry', () => {
     expect(queueDockEntry.name).toBe('conversation-queue-dock')
-    expect(queueDockEntry.inject).toEqual(['slots', 'conversation', 'sessions'])
+    expect(queueDockEntry.inject).toEqual(['slots', 'conversation', 'sessions', 'uiConversation'])
     const register = vi.fn(() => () => undefined)
     const inject = vi.fn((_name: string, callback: () => () => void) => callback())
     queueDockEntry.apply({ slots: { inject, register } } as never)

@@ -15,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // Empty type imports carry the `loader` and `webServer` Context merges for the reads below.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { launchedThroughSsh, launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { canExecute, hasLinuxChooserBinary } from './probe.ts'
 import type { DirectoryPickerBackendKind } from './resolve.ts'
 import { resolveDirectoryPickerBackend } from './resolve.ts'
@@ -43,9 +44,8 @@ export const BACKEND_PACKAGES: Record<DirectoryPickerBackendKind, string> = {
  * Client surface package per resolved kind, mounted with its backend so one
  * resolved interaction still composes both faces. Declared as dependencies by
  * every composing app for the same reason as {@link BACKEND_PACKAGES}. Only the
- * specifier is referenced here — the packages belong to the Client program, so
- * no import of them exists on this side and knip needs them ignored for this
- * workspace.
+ * specifier is referenced here because the packages belong to the Client
+ * program, so no import of them exists on this side.
  */
 export const SURFACE_PACKAGES: Record<DirectoryPickerBackendKind, string> = {
   native: '@deepseek-ai/dsh-client-ui-directory-picker-native',
@@ -63,6 +63,7 @@ export async function apply(ctx: Context): Promise<void> {
   const backend = resolveDirectoryPickerBackend({
     bindHost: ctx.webServer.host,
     platform: process.platform,
+    ssh: launchedThroughSsh(launchEnvironmentOf(ctx)),
     env: process.env,
     linuxChooser: hasLinuxChooserBinary(process.env.PATH, canExecute),
   })

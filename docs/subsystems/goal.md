@@ -69,6 +69,25 @@ interface GoalView extends GoalSnapshot {
 }
 ```
 
+The service also publishes process-local activation edges without changing durable state; clients consume this event for live status.
+
+```ts type-equiv
+/** Live process-local activation update forwarded to UI clients. */
+interface GoalActivationChanged {
+  /** Session whose live goal activation changed. */
+  readonly sessionId: SessionId
+  /** Current exact activation, absent when no goal is current. */
+  readonly goal?: {
+    /** Exact current goal identity. */
+    readonly id: GoalId
+    /** Exact current goal revision. */
+    readonly revision: number
+    /** Current process-local continuation state. */
+    readonly activation: GoalActivation
+  }
+}
+```
+
 ## Durable changes
 
 Every mutation is a durable `goal/change` session event whose payload is either a complete post-mutation snapshot or a clear tombstone. The strict fold and persisted projection derive lifecycle state only from these events; inbox mutations do not affect goal state.
@@ -142,7 +161,7 @@ interface GoalChanged {
 
 ## Service behavior
 
-[`GoalService`](../../packages/goal/goal/src/index.ts) resolves creation defaults, folds strict replay from durable `goal/change` events, enforces exact-live-agent identity and compare-and-set mutations, and emits contained `goal/changed` notifications. The package [README](../../packages/goal/goal/README.md) defines the callable API and model-visible contract.
+[`GoalService`](../../packages/goal/goal/src/index.ts) resolves creation defaults, reads strict replay from the optionally registered `goal` projection, enforces exact-live-agent identity and compare-and-set mutations, and emits contained `goal/changed` notifications. Its first dependent access fails if the projection registry or key is absent. The package [README](../../packages/goal/goal/README.md) defines the callable API and model-visible contract.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -165,7 +184,7 @@ Goal service (`ctx.goals`) backed exclusively by the owning session log.
  * @returns a fresh view or `undefined` when no goal is current.
  * @throws {@link GoalError} when the agent is not the registry's live instance.
  */
-get(agent: Agent): GoalView | undefined
+@Remote('get') get(agent: Agent): GoalView | undefined
 
 /**
  * Remove process-local continuation authority without changing durable goal
@@ -252,6 +271,23 @@ Source: [`packages/goal/goal/src/index.ts`](../../packages/goal/goal/src/index.t
 <a id="goal-events"></a>
 
 ### `goal/*` events
+
+<a id="goalactivation-changed--emit"></a>
+
+#### `goal/activation-changed` — emit
+
+Process-local goal activation changed for one session.
+
+```ts cordis-catalog
+/**
+ * Process-local goal activation changed for one session.
+ * @mode emit
+ * @param payload - session id and the exact current goal activation, or no goal after a clear.
+ */
+'goal/activation-changed'(payload: GoalActivationChanged): void
+```
+
+Source: [`packages/goal/goal/src/types.ts`](../../packages/goal/goal/src/types.ts)
 
 <a id="goalchanged--emit"></a>
 

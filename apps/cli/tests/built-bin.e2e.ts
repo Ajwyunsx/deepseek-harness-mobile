@@ -1,13 +1,28 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
+import { Readable, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  client as createAcpClientApp,
+  methods,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  type SessionNotification,
+} from '@agentclientprotocol/sdk'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
+import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { execa } from 'execa'
+import * as yaml from 'js-yaml'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 /** Published-entry acceptance for argument errors, profile lifecycle, and boot-free config dumps. */
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
+// The dsh built bin cold-starts slowly on the contended self-hosted Windows pool; the
+// execa deadline, its error text, the outer vitest case budget, and waitForFile all
+// share this value so a widening cannot leave a stale 25s diagnostic behind.
+const SPAWN_TIMEOUT_MS = 60_000
 // The release version, including a prerelease such as 0.0.1-rc.1: `--version`
 // prints what this manifest carries, so no test may pin it to a literal.
 const cliVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
@@ -25,7 +40,7 @@ async function runBuiltBin(
   )
   const result = await execa(process.execPath, [dshBin, ...args], {
     input: '',
-    timeout: 25_000,
+    timeout: SPAWN_TIMEOUT_MS,
     killSignal: 'SIGKILL',
     reject: false,
     env: childEnv,
@@ -33,13 +48,13 @@ async function runBuiltBin(
     ...cwd === undefined ? {} : { cwd },
   })
   if (result.timedOut) {
-    throw new Error(`dsh built bin did not exit within 25s. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    throw new Error(`dsh built bin did not exit within ${SPAWN_TIMEOUT_MS / 1_000}s. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
   }
   return { stdout: result.stdout, code: result.exitCode ?? -1, stderr: result.stderr }
 }
 
 async function waitForFile(file: string): Promise<void> {
-  const deadline = Date.now() + 20_000
+  const deadline = Date.now() + SPAWN_TIMEOUT_MS
   while (!existsSync(file)) {
     if (Date.now() >= deadline) throw new Error(`dsh profile lifecycle marker did not appear: ${file}`)
     await new Promise(resolve => setTimeout(resolve, 20))
@@ -135,6 +150,8 @@ function startProfileLifecycle(fixture: ProfileLifecycleFixture, args: readonly 
   return execa(process.execPath, [dshBin, '--profile', 'lifecycle', ...args], {
     cwd: fixture.home,
     input: '',
+    timeout: SPAWN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
     reject: false,
     env: {
       DSH_HOME: fixture.home,
@@ -299,7 +316,7 @@ function startStartupProfile(fixture: StartupFixture, args: readonly string[]) {
     cwd: fixture.home,
     input: '',
     reject: false,
-    timeout: 25_000,
+    timeout: SPAWN_TIMEOUT_MS,
     killSignal: 'SIGKILL',
     env: {
       DSH_HOME: fixture.home,
@@ -324,7 +341,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       const result = await runBuiltBin(removed)
       expect(result.code).toBe(1)
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS * 3 + 30_000)
 
   it('routes help and usage errors without activating startup-dependent rows', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-app-help-'))
@@ -356,6 +373,22 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(headlessHelp.stderr).toBe('')
       expect(headlessHelp.stdout).toContain('Usage: dsh --profile headless')
 
+      const sdkHelp = await runBuiltBin(['--profile', 'sdk', '--help'], {
+        DSH_HOME: home,
+        DSH_TELEMETRY_DISABLED: '1',
+      })
+      expect(sdkHelp.code).toBe(0)
+      expect(sdkHelp.stderr).toBe('')
+      expect(sdkHelp.stdout).toContain('Usage: dsh --profile sdk')
+
+      const acpHelp = await runBuiltBin(['--profile', 'acp', '--help'], {
+        DSH_HOME: home,
+        DSH_TELEMETRY_DISABLED: '1',
+      })
+      expect(acpHelp.code).toBe(0)
+      expect(acpHelp.stderr).toBe('')
+      expect(acpHelp.stdout).toContain('Usage: dsh --profile acp')
+
       const missingTask = await runBuiltBin(['--profile', 'headless'], {
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
@@ -365,13 +398,192 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS * 3 + 30_000)
+
+  it('reports SDK startup failure when stdin reaches EOF first', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-built-sdk-startup-failure-'))
+    const patch = join(home, 'broken-sdk.cordis.yml')
+    writeFileSync(patch, [
+      '- insert:',
+      '    - id: missing-sdk-startup-plugin',
+      '      name: "@deepseek-ai/dsh-missing-sdk-startup-plugin"',
+      '',
+    ].join('\n'))
+    try {
+      const result = await runBuiltBin(['--profile', 'sdk', '--patch', patch], {
+        DSH_HOME: home,
+        DSH_TELEMETRY_DISABLED: '1',
+        DEEPSEEK_API_KEY: 'built-sdk-startup-failure-no-call',
+      }, home)
+      expect(result.code).toBe(1)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toContain('plugin tree failed to load')
+      expect(result.stderr).toContain('@deepseek-ai/dsh-missing-sdk-startup-plugin')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS + 30_000)
+
+  it('serves the SDK protocol with an absolute-path overlay plugin and exits after shutdown', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-built-sdk-'))
+    const pluginPath = join(home, 'plugin #100%.mjs')
+    const marker = join(home, 'plugin-loaded')
+    writeFileSync(pluginPath, [
+      "import { writeFileSync } from 'node:fs'",
+      'export function apply(ctx, config) { writeFileSync(config.marker, "loaded") }',
+      '',
+    ].join('\n'))
+    const patch = join(home, 'absolute.patch.yml')
+    writeFileSync(patch, JSON.stringify([{ insert: [
+      { id: 'absolute-plugin', name: pluginPath, config: { marker } },
+    ] }]))
+    const child = execa(process.execPath, [dshBin, '--profile', 'sdk', '--patch', patch], {
+      cwd: home,
+      reject: false,
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      env: {
+        ...process.env,
+        DSH_HOME: home,
+        DSH_TELEMETRY_DISABLED: '1',
+        DEEPSEEK_API_KEY: 'built-sdk-profile-no-call',
+      },
+      extendEnv: false,
+    })
+    const stdoutLines = createInterface({ input: child.stdout, crlfDelay: Infinity })[Symbol.asyncIterator]()
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+    const response = async (id: number): Promise<Record<string, unknown>> => {
+      for (;;) {
+        const line = await stdoutLines.next()
+        if (line.done) throw new Error(`SDK profile stdout closed before response ${String(id)}; stderr=${stderr}`)
+        let value: Record<string, unknown>
+        try {
+          value = JSON.parse(line.value) as Record<string, unknown>
+        } catch {
+          throw new Error(`SDK profile wrote non-JSON stdout: ${line.value}`)
+        }
+        if (value.id === id) return value
+      }
+    }
+    try {
+      child.stdin.write(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { cwd: home, provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      })}\n`)
+      const initialized = await response(1)
+      expect(initialized, `${JSON.stringify(initialized)}\n${stderr}`).toMatchObject({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { serverInfo: { name: 'deepseek-harness-sdk-runtime' } },
+      })
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'shutdown' })}\n`)
+      expect(await response(2)).toEqual({ jsonrpc: '2.0', id: 2, result: {} })
+      const result = await child
+      expect(result.timedOut, stderr).toBe(false)
+      expect(result.signal, stderr).toBeUndefined()
+      expect(result.exitCode, stderr).toBe(0)
+      expect(stderr).toBe('')
+      expect(readFileSync(marker, 'utf8')).toBe('loaded')
+    } finally {
+      child.kill('SIGKILL')
+      await child
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS + 30_000)
+
+  it('runs a mock-backed ACP turn through the acp profile and exits on disconnect', async () => {
+    const apiKey = 'built-acp-profile-key'
+    const server = await startMockLlmServer({
+      sequence: ['success'],
+      apiKey,
+      successText: 'ACP BUILT PROFILE OK',
+    })
+    const home = mkdtempSync(join(tmpdir(), 'dsh-built-acp-'))
+    const child = execa(process.execPath, [dshBin, '--profile', 'acp'], {
+      cwd: home,
+      reject: false,
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      env: {
+        ...process.env,
+        DSH_HOME: home,
+        DSH_TELEMETRY_DISABLED: '1',
+        DEEPSEEK_API_KEY: apiKey,
+        DEEPSEEK_BASE_URL: server.baseURL,
+        DSH_PERMISSION_MODE: 'danger-full-access',
+      },
+      extendEnv: false,
+    })
+    const rawOut: string[] = []
+    const passthrough = new Readable({ read() {} })
+    child.stdout.on('data', (chunk: Buffer) => {
+      rawOut.push(chunk.toString('utf8'))
+      passthrough.push(chunk)
+    })
+    child.stdout.on('end', () => { passthrough.push(null) })
+    const stream = ndJsonStream(
+      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+      Readable.toWeb(passthrough) as ReadableStream<Uint8Array>,
+    )
+    const updates: SessionNotification['update'][] = []
+    const clientApp = createAcpClientApp({ name: 'dsh-built-acp-profile' })
+      .onNotification(methods.client.session.update, ({ params }) => {
+        updates.push(params.update)
+        return Promise.resolve()
+      })
+      .onRequest(methods.client.session.requestPermission, () => {
+        return Promise.resolve({ outcome: { outcome: 'cancelled' } })
+      })
+    const client = clientApp.connect(stream).agent
+    try {
+      const initialized = await client.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      })
+      expect(initialized.agentInfo).toMatchObject({ name: 'deepseek-harness-acp' })
+      expect(initialized.agentCapabilities).toEqual({
+        mcpCapabilities: { http: true },
+        promptCapabilities: { image: false, audio: false, embeddedContext: false },
+        sessionCapabilities: { close: {}, list: {}, resume: {} },
+      })
+      expect('_meta' in initialized).toBe(false)
+      const session = await client.request(methods.agent.session.new, { cwd: home, mcpServers: [] })
+      expect(session.sessionId).toBeTruthy()
+      expect(await client.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'reply from the built ACP profile' }],
+      })).toEqual({ stopReason: 'end_turn' })
+      expect(updates).toContainEqual(expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'ACP BUILT PROFILE OK' },
+      }))
+      const message = updates.find(update => update.sessionUpdate === 'agent_message_chunk')
+      expect(message !== undefined && 'messageId' in message && typeof message.messageId === 'string').toBe(true)
+      expect(server.requests).toHaveLength(1)
+      child.stdin.end()
+      const result = await child
+      expect(result.exitCode, `signal=${String(result.signal)}; stderr=${result.stderr}`).toBe(0)
+      expect(result.stderr).toBe('')
+      for (const line of rawOut.join('').split('\n').filter(value => value.trim() !== '')) {
+        expect(() => JSON.parse(line) as unknown).not.toThrow()
+      }
+    } finally {
+      child.kill('SIGKILL')
+      await child
+      await server.close()
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('runs the headless profile through its app-owned task positional', async () => {
     const apiKey = 'built-dsh-headless-key'
     const server = await startMockLlmServer({
-      sequence: ['success'],
+      sequence: ['reasoning_success'],
       apiKey,
+      reasoningText: 'Inspecting the published entry.',
       successText: 'published headless profile reached the mock',
     })
     const home = mkdtempSync(join(tmpdir(), 'dsh-built-headless-'))
@@ -384,7 +596,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       })
       expect(result.code, result.stderr).toBe(0)
       expect(result.stdout).toBe('published headless profile reached the mock')
-      expect(result.stderr).toBe('')
+      expect(result.stderr).toBe('dsh: reasoning:\nInspecting the published entry.')
       expect(server.requests.length).toBeGreaterThan(0)
       expect(server.requests.every(request => request.path === '/chat/completions')).toBe(true)
       expect(JSON.stringify(server.requests.map(request => request.body))).toContain('answer from the published entry')
@@ -392,7 +604,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       await server.close()
       rmSync(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('does not load a project environment for --version', async () => {
     const project = mkdtempSync(join(tmpdir(), 'dsh-version-project-'))
@@ -402,6 +614,25 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(result).toEqual({ code: 0, stdout: cliVersion, stderr: '' })
     } finally {
       rmSync(project, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('runs through an installed-style symlink', async () => {
+    const installation = mkdtempSync(join(tmpdir(), 'dsh-bin-link-'))
+    const installedBin = join(installation, 'dsh')
+    symlinkSync(dshBin, installedBin)
+    try {
+      const result = await execa(process.execPath, [installedBin, '--version'], {
+        input: '',
+        timeout: SPAWN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        reject: false,
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe(cliVersion)
+      expect(result.stderr).toBe('')
+    } finally {
+      rmSync(installation, { recursive: true, force: true })
     }
   })
 
@@ -415,7 +646,75 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
+
+  it('creates a custom profile from the shipped web template before booting it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-from-default-profile-'))
+    try {
+      const created = await runBuiltBin(
+        ['--profile', 'rescue', '--from-default-profile', 'web', '--help'],
+        { DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+      )
+      expect(created.code).toBe(0)
+      expect(created.stderr).toBe('')
+      expect(created.stdout).toContain('Usage: dsh --profile web')
+
+      const dir = join(home, 'profiles', 'rescue')
+      const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+        dependencies: Record<string, string>
+        dsh: { profile: { bundles: string[]; patchReload: string } }
+      }
+      expect(manifest.dependencies).toEqual({})
+      expect(manifest.dsh.profile).toEqual({
+        bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'],
+        patchReload: 'live',
+      })
+      expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('[]')
+      expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('nodeLinker: hoisted')
+
+      const repeated = await runBuiltBin(
+        ['--profile', 'rescue', '--from-default-profile', 'web', '--help'],
+        { DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+      )
+      expect(repeated.code).toBe(1)
+      expect(repeated.stdout).toBe('')
+      expect(repeated.stderr).toContain('profile "rescue" already exists')
+      expect(repeated.stderr).toContain('omit --from-default-profile to use it')
+
+      const reopened = await runBuiltBin(
+        ['--profile', 'rescue', '--help'],
+        { DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+      )
+      expect(reopened.code).toBe(0)
+      expect(reopened.stderr).toBe('')
+      expect(reopened.stdout).toContain('Usage: dsh --profile web')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS * 3 + 30_000)
+
+  it('keeps a newly created profile when application boot rejects its arguments', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-from-default-profile-failed-boot-'))
+    try {
+      const failed = await runBuiltBin(
+        ['--profile', 'rescue', '--from-default-profile', 'web', '--port', 'not-a-number'],
+        { DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+      )
+      expect(failed.code).toBe(1)
+      expect(failed.stderr).toContain('--port must be a number')
+      expect(existsSync(join(home, 'profiles', 'rescue', 'package.json'))).toBe(true)
+
+      const retried = await runBuiltBin(
+        ['--profile', 'rescue', '--help'],
+        { DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+      )
+      expect(retried.code).toBe(0)
+      expect(retried.stderr).toBe('')
+      expect(retried.stdout).toContain('Usage: dsh --profile web')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS * 2 + 30_000)
 
   it('uses the launching endpoint and managed credential through the published entry', async () => {
     const apiKey = 'built-home-layer-key'
@@ -455,13 +754,13 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       rmSync(home, { recursive: true, force: true })
       rmSync(project, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('reports a patch-overlay boot failure without hanging', async () => {
     // The HMR main watcher's initial scan once refreshed the include
     // mid-initial-apply, deadlocking the failing apply's rollback against the
     // refresh drain: dsh exited 13 with no diagnostic instead of settling
-    // ([Agent Note](../../../.agents/notes/implemented/bug-fix/2026-08-03-hmr-initial-scan-boot-deadlock.md)).
+    // ([vendor/README.md](../../../vendor/README.md)).
     const home = mkdtempSync(join(tmpdir(), 'dsh-invalid-patch-'))
     try {
       const result = await runBuiltBin(['--profile', 'web', '--patch', invalidProvider], {
@@ -475,7 +774,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('lets a profile without a parser ignore app arguments and dispose on a startup-time signal', async () => {
     const fixture = createProfileLifecycleFixture()
@@ -491,7 +790,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       child.kill('SIGKILL')
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('fully settles a custom profile, hot-reloads its patch layer with removal reverting, and disposes on a signal', async () => {
     const fixture = createProfileLifecycleFixture()
@@ -515,13 +814,12 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       ].join('\n'))
       await waitForFile(fixture.ready)
       expect(readFileSync(configFile, 'utf8')).toBe('2')
-      // Removal reverts: the bundle's inserted row must return to its own
-      // default config, not keep the removed override — the insert-aliasing
-      // regression (a shared patch object mutated in place by a former
-      // generation would make this impossible).
+      // Unlink exercises layer removal without racing Chokidar's change-event
+      // suppression window after the preceding edit. The bundle default must return.
       rmSync(fixture.ready)
-      writeFileSync(profilePatch, '[]\n')
+      rmSync(profilePatch)
       await waitForFile(fixture.ready)
+      expect(existsSync(profilePatch)).toBe(false)
       expect(readFileSync(configFile, 'utf8')).toBe('bundle-default')
       // The home-level user layer ($DSH_HOME/cordis.patch.yml) is live too
       // and outranks the per-profile layer.
@@ -541,9 +839,10 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(existsSync(fixture.disposed)).toBe(true)
     } finally {
       child.kill('SIGKILL')
+      await child
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('hands the app arguments to the profile, which applies them before its rows start', async () => {
     const fixture = createStartupFixture()
@@ -559,7 +858,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       child.kill('SIGKILL')
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('starts a consumer on its composed value when the invocation carries no app arguments', async () => {
     const fixture = createStartupFixture()
@@ -573,7 +872,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       child.kill('SIGKILL')
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('keeps the app arguments across a user patch reload', async () => {
     // A live edit recomposes every row while the provider service remains
@@ -607,7 +906,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       child.kill('SIGKILL')
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it("prints the app's own help, starts none of its rows, and exits", async () => {
     const fixture = createStartupFixture()
@@ -620,7 +919,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS + 30_000)
 
   it('anchors a relative add spec to the invoking directory, not the profile', async () => {
     // `dsh plugin --profile x add .` from a plugin checkout must install THAT
@@ -638,7 +937,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       const result = await execa(process.execPath, [dshBin, 'plugin', '--profile', 'anchor', 'add', '.'], {
         cwd: checkout,
         input: '',
-        timeout: 60_000,
+        timeout: SPAWN_TIMEOUT_MS,
         killSignal: 'SIGKILL',
         reject: false,
         env: { DSH_HOME: home },
@@ -669,7 +968,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       rmSync(home, { recursive: true, force: true })
       rmSync(checkout, { recursive: true, force: true })
     }
-  }, 90_000)
+  }, SPAWN_TIMEOUT_MS * 2 + 30_000)
 
   it('activates a dependency that gained dsh.bundle in a later update', async () => {
     // Reconcile runs against the INSTALLED state on every successful pnpm
@@ -706,7 +1005,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, SPAWN_TIMEOUT_MS * 2 + 30_000)
 
   describe('config dump', () => {
     let home: string
@@ -721,7 +1020,31 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(stdout).toContain('agents: []')
       expect(stdout).toContain('# == @deepseek-ai/dsh-base')
       expect(stdout).toContain("name: '@deepseek-ai/dsh-host-webserver'")
-    }, 30_000)
+      expect(existsSync(join(home, 'profiles', 'node_modules'))).toBe(false)
+    }, SPAWN_TIMEOUT_MS + 30_000)
+
+    it('creates a custom profile from a shipped template before printing it', async () => {
+      const { stdout, code, stderr } = await runBuiltBin(
+        ['--profile', 'rescue', '--from-default-profile', 'web', '--dump-default-config'],
+        { DSH_HOME: home },
+      )
+      expect(code).toBe(0)
+      expect(stderr).toBe('')
+      expect(stdout).toContain('# == @deepseek-ai/dsh-web-app')
+      expect(existsSync(join(home, 'profiles', 'rescue', 'package.json'))).toBe(true)
+    }, SPAWN_TIMEOUT_MS + 30_000)
+
+    it('rejects an unknown source before creating the target profile', async () => {
+      const { stdout, code, stderr } = await runBuiltBin(
+        ['--profile', 'rescue', '--from-default-profile', 'unknown', '--dump-default-config'],
+        { DSH_HOME: home },
+      )
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).toContain('unknown default profile "unknown"')
+      expect(stderr).toContain('"web"')
+      expect(existsSync(join(home, 'profiles', 'rescue'))).toBe(false)
+    }, SPAWN_TIMEOUT_MS + 30_000)
 
     it('prints the headless profile without Host or browser layers', async () => {
       const { stdout, code, stderr } = await runBuiltBin(
@@ -734,7 +1057,53 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(stdout).not.toMatch(/name: '@deepseek-ai\/dsh-host-/)
       expect(stdout).not.toContain("name: '@deepseek-ai/dsh-web-app'")
       expect(stdout).not.toMatch(/name: '@deepseek-ai\/dsh-client-/)
-    }, 30_000)
+    }, SPAWN_TIMEOUT_MS + 30_000)
+
+    it('prints the exact standalone sdk-minimal tree without dsh-base', async () => {
+      const { stdout, code, stderr } = await runBuiltBin(
+        ['--profile', 'sdk-minimal', '--dump-default-config'],
+        { DSH_HOME: home },
+      )
+      expect(code).toBe(0)
+      expect(stderr).toBe('')
+      const rows = yaml.load(stdout, { schema: entryListSchema }) as Array<{ id?: string; name?: string }>
+      expect(rows.map(row => [row.id, row.name])).toEqual([
+        ['sdk-app-startup', '@deepseek-ai/dsh-sdk-app'],
+        ['sdk-jsonrpc-server', '@deepseek-ai/dsh-sdk-jsonrpc-server'],
+        ['deepseek-llm-api-extensions', '@deepseek-ai/dsh-deepseek-llm-api-extensions'],
+        ['session-log-deepseek', '@deepseek-ai/dsh-session-log-deepseek'],
+        ['plugin-package-inventory-deepseek', '@deepseek-ai/dsh-plugin-package-inventory-deepseek'],
+        ['llm-deepseek', '@deepseek-ai/dsh-llm-deepseek'],
+        ['sandbox', '@deepseek-ai/dsh-sandbox-local'],
+        ['session-projection', '@deepseek-ai/dsh-session-projection'],
+        ['sandbox-policy', '@deepseek-ai/dsh-sandbox-policy'],
+        ['subprocess', '@deepseek-ai/dsh-subprocess-local'],
+        ['pty', '@deepseek-ai/dsh-terminal'],
+        ['terminal-bash', '@deepseek-ai/dsh-terminal-bash'],
+        ['terminal-pwsh', '@deepseek-ai/dsh-terminal-bash'],
+        ['timer', '@deepseek-ai/cordis-plugin-timer'],
+        ['llm', '@deepseek-ai/dsh-llm'],
+        ['session', '@deepseek-ai/dsh-session'],
+        ['session-title', '@deepseek-ai/dsh-session-title'],
+        ['system-prompt', '@deepseek-ai/dsh-system-prompt'],
+        ['tools', '@deepseek-ai/dsh-tools'],
+        ['agent', '@deepseek-ai/dsh-agent'],
+        ['llm-retry', '@deepseek-ai/dsh-llm-retry'],
+        ['jobs', '@deepseek-ai/dsh-jobs-local'],
+        ['invariants', '@deepseek-ai/dsh-invariants'],
+        ['session-invariant', '@deepseek-ai/dsh-session/invariant'],
+        ['agent-invariant', '@deepseek-ai/dsh-agent/invariant'],
+        ['scope-invariant', '@deepseek-ai/dsh-scope/invariant'],
+        ['agent-loop-invariant', '@deepseek-ai/dsh-agent-loop/invariant'],
+        ['agent-loop', '@deepseek-ai/dsh-agent-loop'],
+        ['persistent-bash', '@deepseek-ai/dsh-tool-bash-persistent'],
+        ['persistent-pwsh', '@deepseek-ai/dsh-tool-pwsh-persistent'],
+        ['sessions', '@deepseek-ai/dsh-session-persistence-jsonl'],
+      ])
+      expect(stdout).toContain('# == @deepseek-ai/dsh-sdk-minimal')
+      expect(stdout).not.toContain('@deepseek-ai/dsh-base')
+      expect(stdout).not.toContain('@deepseek-ai/dsh-web-app')
+    }, SPAWN_TIMEOUT_MS * 2 + 30_000)
 
     it('composes the profile user layer and a --patch overlay in order', async () => {
       // Auto-init the web profile first, then write its user layer.
@@ -773,6 +1142,6 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       // Both layers patched the row; the comment lists them in application order.
       expect(stdout).toContain(`patched by ${profilePatch}, ${overlay}`)
       expect(stderr).toContain('patch: entry "absent-row" not found')
-    }, 30_000)
+    }, SPAWN_TIMEOUT_MS * 2 + 30_000)
   })
 })

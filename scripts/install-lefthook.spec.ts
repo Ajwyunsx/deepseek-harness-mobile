@@ -23,9 +23,6 @@ const pairingMergeDriver = 'scripts/merge-translation-pairing-driver.sh %O %A %B
 const scriptsDirectory = fileURLToPath(new URL('.', import.meta.url))
 const tsxPackageDirectory = dirname(fileURLToPath(import.meta.resolve('tsx/package.json')))
 const fixtures: string[] = []
-// Multi-worktree cases spawn several Git and Node subprocesses; native Windows
-// coverage concurrency can delay them without changing installer behavior.
-const MULTI_PROCESS_TEST_TIMEOUT_MS = 30_000
 
 interface Fixture {
   container: string
@@ -94,6 +91,8 @@ try {
 }
 const delay = Number(process.env.DSH_TEST_LEFTHOOK_DELAY_MS ?? 0)
 if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+const replaceLockPath = process.env.DSH_TEST_LEFTHOOK_REPLACE_LOCK_PATH
+if (replaceLockPath !== undefined) writeFileSync(replaceLockPath, 'replacement owner\\n')
 const shouldFail = process.env.DSH_TEST_LEFTHOOK_FAIL === '1'
 if (!shouldFail) {
   const binary = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'lefthook.cmd' : 'lefthook')
@@ -211,7 +210,15 @@ function runInstaller(
   })
 }
 
-describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
+// Every case builds scratch worktrees and drives them through spawned Git and
+// Node subprocesses, so the suite is bound by process creation rather than by
+// its assertions. The value matches DSH_COVERAGE_TEST_TIMEOUT_MS, which the
+// Windows coverage lane passes as --testTimeout: a describe value overrides that
+// flag rather than yielding to it, so a smaller one here lowers what the lane
+// grants every case in this file, none of which carries an allowance of its own.
+// Rationale and the paired hook budget are in
+// .agents/notes/archived/testing/2026-08-29-windows-lane-hook-and-lefthook-budget.md.
+describe('worktree-local Lefthook installer', { timeout: 90_000 }, () => {
   for (const [label, extraEnv] of [
     ['CI', { CI: 'true' }],
     ['GitHub Actions', { GITHUB_ACTIONS: 'true' }],
@@ -290,7 +297,7 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
     git(fixture, fixture.main, ['worktree', 'remove', '--force', fixture.linked])
     expect(readFileSync(join(mainHooks, 'pre-commit'), 'utf8')).toBe(mainHookBeforeRemoval)
     expect(readFileSync(legacyHook, 'utf8')).toBe('#!/bin/sh\n# legacy hook\n')
-  }, MULTI_PROCESS_TEST_TIMEOUT_MS)
+  })
 
   it('replaces the owned hook path Git copies into a newly added worktree', async () => {
     const fixture = createFixture()
@@ -315,7 +322,7 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
       '# config=late-linked-worktree-config',
     )
     expect(readFileSync(join(mainHooks, 'pre-commit'), 'utf8')).toBe(mainHookBefore)
-  }, MULTI_PROCESS_TEST_TIMEOUT_MS)
+  })
 
   it('serializes concurrent installs and keeps repeated output stable', async () => {
     const fixture = createFixture()
@@ -336,7 +343,7 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
     expect(readFileSync(mainHookPath, 'utf8')).toBe(initialHook)
     expect(existsSync(join(commonDirectory(fixture), 'dsh-lefthook-install.lock'))).toBe(false)
     expect(existsSync(join(hooksPath(fixture, fixture.main), '.fake-lefthook-running'))).toBe(false)
-  }, MULTI_PROCESS_TEST_TIMEOUT_MS)
+  })
 
   it('waits for a concurrent installer to finish publishing its lock record', async () => {
     const fixture = createFixture()
@@ -374,7 +381,7 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
     expect(readFileSync(join(movedHooks, '.dsh-lefthook-owned'), 'utf8')).toContain(
       JSON.stringify(movedHooks),
     )
-  }, MULTI_PROCESS_TEST_TIMEOUT_MS)
+  })
 
   it.skipIf(process.platform === 'win32')('refuses a multiply linked ownership marker before relocation rewrites it', async () => {
     const fixture = createFixture()
@@ -415,7 +422,7 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
       expect(result.stderr).toContain('non-regular or multiply linked hook entry')
       expect(readFileSync(externalHook, 'utf8')).toBe(externalContent)
     }
-  }, MULTI_PROCESS_TEST_TIMEOUT_MS)
+  })
 
   it('restores the marker-backed stale hook path when relocation reinstall fails', async () => {
     const fixture = createFixture()
@@ -527,21 +534,14 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
   it('does not release an installer lock whose ownership changed', async () => {
     const fixture = createFixture()
     const lockPath = installLockPath(fixture)
-    const runningPath = join(hooksPath(fixture, fixture.main), '.fake-lefthook-running')
-    const install = runInstaller(fixture, fixture.main, { DSH_TEST_LEFTHOOK_DELAY_MS: '250' })
-    try {
-      await waitForPath(runningPath)
-    } catch (error) {
-      await install
-      throw error
-    }
-    const replacementRecord = 'replacement owner\n'
-    writeFileSync(lockPath, replacementRecord)
+    // The fake child replaces the record while the installer holds the lock.
+    const result = await runInstaller(fixture, fixture.main, {
+      DSH_TEST_LEFTHOOK_REPLACE_LOCK_PATH: lockPath,
+    })
 
-    const result = await install
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('installer lock ownership changed')
-    expect(readFileSync(lockPath, 'utf8')).toBe(replacementRecord)
+    expect(readFileSync(lockPath, 'utf8')).toBe('replacement owner\n')
   })
 
   it.skipIf(process.platform === 'win32')('preserves trailing spaces in worktree paths', async () => {

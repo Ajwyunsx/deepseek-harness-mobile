@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import GoalService, {
   GoalError,
   GoalId,
@@ -11,57 +12,81 @@ import GoalService, {
   foldGoal,
 } from '@deepseek-ai/dsh-goal'
 import type { GoalChangeMeta, GoalRef, GoalSnapshotChangeMeta } from '@deepseek-ai/dsh-goal'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 
 interface StubAgent {
   agent: Agent
   session: Session
 }
 
+const isolatedInboxCtx = new Context()
+await isolatedInboxCtx.plugin(SessionStore)
+await isolatedInboxCtx.plugin(SessionProjectionRegistry)
+await isolatedInboxCtx.plugin(AgentRegistry)
+const sessionStubs = new WeakMap<Session, StubAgent>()
+
 /** Number the next balanced test-fixture turn. */
 function nextTurn(session: Session): number {
-  return session.events.reduce((max, event) => event.type === 'turn/start' ? Math.max(max, event.data.turn) : max, 0) + 1
+  return session.snapshotEvents().reduce((max, event) => event.type === 'turn/start' ? Math.max(max, event.data.turn) : max, 0) + 1
 }
 
 /** Mirror the public Agent.inject contract for domain tests. */
 function appendInjection(session: Session, input: UserMessage): void {
-  new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }).append('next-step', input)
+  stubAgentForSession(session).agent.inbox.append('next-step', input)
 }
 
 /** Build a registry-compatible agent around one concrete session. */
-function stubAgentForSession(session: Session): StubAgent {
+function stubAgentForSession(session: Session, suppliedCtx?: Context): StubAgent {
+  const existing = sessionStubs.get(session)
+  if (existing !== undefined) return existing
   const id = session.id
-  const inbox = new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} })
+  const agentCtx = suppliedCtx ?? isolatedInboxCtx
+  if (suppliedCtx === undefined) {
+    agentCtx.sessions.enter(session)
+  }
+  const inbox = createInboxStub()
   const agent: Agent = {
     id,
     options: {},
     session,
     inbox,
-    ctx: new Context(),
+    ctx: agentCtx,
     status: 'idle',
     send: () => {},
     followup: () => {},
     steer: () => {},
-    inject(input) { inbox.append('next-step', input) },
+    inject(input) { this.inbox.append('next-step', input) },
     cancel() {},
     runMaintenance: task => task(new AbortController().signal),
     whenIdle() { return Promise.resolve() },
   }
-  return {
+  const stub = {
     agent,
     session,
   }
+  sessionStubs.set(session, stub)
+  return stub
 }
 
 /** Build a registry-compatible agent around a fresh session. */
-function stubAgent(rawId: string, seed?: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): StubAgent {
-  return stubAgentForSession(Session.create(SessionId(rawId), seed))
+function stubAgent(
+  rawId: string,
+  seed?: readonly import('@deepseek-ai/dsh-session').SessionEvent[],
+  ctx?: Context,
+): StubAgent {
+  const session = ctx === undefined
+    ? Session.create(SessionId(rawId), seed)
+    : ctx.sessions.create(SessionId(rawId), { ...(seed === undefined ? {} : { seed }) })
+  return stubAgentForSession(session, ctx)
 }
 
 async function harness(config: { defaultMaxGoalRounds?: number } = {}) {
   const ctx = new Context()
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(GoalService, config)
-  const stub = stubAgent(`goal-test-${Math.random()}`)
+  const stub = stubAgent(`goal-test-${Math.random()}`, undefined, ctx)
   ctx.agents.register(stub.agent)
   return { ctx, ...stub }
 }
@@ -78,6 +103,13 @@ function appendRound(session: Session, ref: GoalRef, round: number): void {
 }
 
 describe('GoalService creation and replay', () => {
+  it('does not activate without the required projection registry', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(GoalService)
+    expect(ctx.get('goals')).toBeUndefined()
+  })
+
   it('applies the configured default and writes one durable goal change', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_700_000_000_000)
@@ -99,8 +131,8 @@ describe('GoalService creation and replay', () => {
     })
     expect(goal.id).toMatch(/^goal-/)
     expect(seen).toEqual(['create'])
-    expect(session.events.map(event => event.type)).toEqual(['goal/change'])
-    const context = session.events[0]
+    expect(session.snapshotEvents().map(event => event.type)).toEqual(['goal/change'])
+    const context = session.snapshotEvents()[0]
     expect(context?.type).toBe('goal/change')
     if (context?.type !== 'goal/change') throw new Error('expected durable goal change')
     const change = decodeGoalChange(context.data)
@@ -108,7 +140,7 @@ describe('GoalService creation and replay', () => {
     expect(change).toMatchObject({ operation: 'create', goal: { id: goal.id } })
     expect(agent.inbox.nextStep).toEqual([])
     expect(session.deriveMessages()).toEqual([])
-    expect(foldGoal(session.events)).toMatchObject({ goal: { id: goal.id }, roundsStarted: 0 })
+    expect(foldGoal(session.snapshotEvents())).toMatchObject({ goal: { id: goal.id }, roundsStarted: 0 })
     vi.useRealTimers()
   })
 
@@ -131,9 +163,11 @@ describe('GoalService creation and replay', () => {
   it('also resolves the default when constructed directly without Cordis config normalization', async () => {
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)
-    const goals = new GoalService(ctx)
+    await ctx.plugin(SessionProjectionRegistry)
     const stub = stubAgent('goal-direct-construction')
     ctx.agents.register(stub.agent)
+    const goals = new GoalService(ctx)
+    await new Promise(resolve => setImmediate(resolve))
     expect(goals.create(stub.agent, { objective: 'direct' })).toMatchObject({
       objective: 'direct', maxGoalRounds: 256,
     })
@@ -142,6 +176,7 @@ describe('GoalService creation and replay', () => {
   it('rejects invalid direct configuration', async () => {
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     await expect(ctx.plugin(GoalService, { defaultMaxGoalRounds: -1 })).rejects.toThrow(expect.objectContaining({
       code: 'GOAL_INVALID_MAX_ROUNDS',
     }))
@@ -155,8 +190,9 @@ describe('GoalService creation and replay', () => {
 
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(GoalService)
-    const resumed = stubAgent('seeded-goal', first.session.events)
+    const resumed = stubAgent('seeded-goal', first.session.snapshotEvents())
     ctx.agents.register(resumed.agent)
     expect(ctx.goals.get(resumed.agent)).toMatchObject({
       id: created.id,
@@ -168,14 +204,15 @@ describe('GoalService creation and replay', () => {
   it('inherits the completed-turn goal prefix through SessionStore.fork with child activation disarmed', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(GoalService)
-    const parent = stubAgentForSession(ctx.sessions.create(SessionId('goal-fork-parent')))
+    const parent = stubAgentForSession(ctx.sessions.create(SessionId('goal-fork-parent')), ctx)
     ctx.agents.register(parent.agent)
     const goal = ctx.goals.create(parent.agent, { objective: 'inherit through fork', maxGoalRounds: 5 })
     appendRound(parent.session, goal, 1)
 
-    const child = stubAgentForSession(ctx.sessions.fork(parent.session))
+    const child = stubAgentForSession(ctx.sessions.fork(parent.session), ctx)
     ctx.agents.register(child.agent)
     expect(ctx.goals.get(child.agent)).toMatchObject({
       id: goal.id,
@@ -184,47 +221,56 @@ describe('GoalService creation and replay', () => {
       activation: 'disarmed',
     })
     expect(child.session.header.parentSession).toBe(parent.session.id)
-    expect(child.session.header.seedLength).toBe(parent.session.seq)
+    expect(child.session.header.isSeeded).toBe(true)
+    expect(child.session.inheritedEventCount).toBe(parent.session.seq)
   })
 
   it('disarms live activation on every session-start edge', async () => {
     const { ctx, agent, session } = await harness()
+    const activations: Array<{ activation: string | undefined; id: string | undefined; revision: number | undefined }> = []
+    ctx.on('goal/activation-changed', ({ goal }) => {
+      activations.push({ activation: goal?.activation, id: goal?.id, revision: goal?.revision })
+    })
     let goal = ctx.goals.create(agent, { objective: 'stay stopped after resume' })
     expect(goal.activation).toBe('armed')
     agentEvents(ctx, agent).emit('agent/session-start', { source: 'resume' })
     expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
     goal = ctx.goals.resume(agent, goal)
     expect(goal).toMatchObject({ phase: 'active', activation: 'armed', revision: 2 })
-    expect(() => foldGoal(session.events)).not.toThrow()
+    expect(activations.map(entry => entry.activation)).toEqual(['armed', 'disarmed', 'armed'])
+    expect(activations.map(entry => entry.id)).toEqual([goal.id, goal.id, goal.id])
+    expect(activations.map(entry => entry.revision)).toEqual([1, 1, 2])
+    expect(() => foldGoal(session.snapshotEvents())).not.toThrow()
   })
 
   it('lets a lifecycle owner disarm without writing a durable revision', async () => {
     const { ctx, agent, session } = await harness()
     const goal = ctx.goals.create(agent, { objective: 'survive driver reload' })
-    const before = session.events.length
+    const before = session.snapshotEvents().length
     expect(ctx.goals.disarm(agent)).toMatchObject({
       id: goal.id,
       revision: goal.revision,
       phase: 'active',
       activation: 'disarmed',
     })
-    expect(session.events).toHaveLength(before)
+    expect(session.snapshotEvents()).toHaveLength(before)
     expect(ctx.goals.resume(agent, goal)).toMatchObject({ revision: 2, activation: 'armed' })
   })
 
-  it('removes the service and its session-start listener with the providing fiber', async () => {
+  it('removes the service and projection with the providing fiber', async () => {
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     const fiber = await ctx.plugin(GoalService)
     const first = ctx.goals
     const stub = stubAgent('goal-hmr')
     ctx.agents.register(stub.agent)
-    const goal = first.create(stub.agent, { objective: 'survive service reload' })
+    const goal = ctx.goals.create(stub.agent, { objective: 'survive service reload' })
 
     await fiber.dispose()
     expect(ctx.get('goals')).toBeUndefined()
-    agentEvents(ctx, stub.agent).emit('agent/session-start', { source: 'resume' })
-    expect(first.get(stub.agent)).toMatchObject({ id: goal.id, activation: 'armed' })
+    expect(ctx.sessionProjections.stateOf(stub.session, 'goal')).toBeUndefined()
+    expect(() => first.get(stub.agent)).toThrow('goal projection is not registered')
 
     await ctx.plugin(GoalService)
     expect(ctx.goals).not.toBe(first)
@@ -235,7 +281,7 @@ describe('GoalService creation and replay', () => {
     const { ctx, agent } = await harness()
     // A same-id agent backed by a different session object — the live-instance
     // check must reject it even though the ids match.
-    const impostor = stubAgentForSession(Session.create(agent.id)).agent
+    const impostor = { ...agent, session: Session.create(agent.id) } as Agent
     expect(() => ctx.goals.get(impostor)).toThrow(expect.objectContaining({ code: 'GOAL_AGENT_NOT_LIVE' }))
     expect(() => ctx.goals.create(impostor, { objective: 'no' })).toThrow(expect.objectContaining({
       code: 'GOAL_AGENT_NOT_LIVE',
@@ -370,7 +416,7 @@ describe('GoalService mutations', () => {
     const tombstone = ctx.goals.clear(agent, goal)
     expect(tombstone).toEqual({ id: goal.id, revision: 2 })
     expect(ctx.goals.get(agent)).toBeUndefined()
-    expect(foldGoal(session.events)).toEqual({ roundsStarted: 0, lastRef: tombstone })
+    expect(foldGoal(session.snapshotEvents())).toEqual({ roundsStarted: 0, lastRef: tombstone })
     expect(() => ctx.goals.clear(agent, goal)).toThrow(expect.objectContaining({ code: 'GOAL_NOT_FOUND' }))
     const next = ctx.goals.create(agent, { objective: 'fresh' })
     expect(next.id).not.toBe(goal.id)
@@ -386,12 +432,12 @@ describe('GoalService mutations', () => {
     expect(goal.updatedAt).toBe(100)
     vi.setSystemTime(80)
     ctx.goals.clear(agent, goal)
-    const clear = session.events
+    const clear = session.snapshotEvents()
       .filter(event => event.type === 'goal/change')
       .map(event => event.type === 'goal/change' ? decodeGoalChange(event.data) : undefined)
       .at(-1)
     expect(clear).toMatchObject({ operation: 'clear', clearedAt: 100 })
-    expect(() => foldGoal(session.events)).not.toThrow()
+    expect(() => foldGoal(session.snapshotEvents())).not.toThrow()
     vi.useRealTimers()
   })
 
@@ -412,19 +458,20 @@ describe('GoalService mutations', () => {
     goal = ctx.goals.edit(agent, goal, { objective: 'deferred edit' })
     goal = ctx.goals.pause(agent, goal)
     expect(goal).toMatchObject({ revision: 3, phase: 'paused', activation: 'disarmed' })
-    expect(session.events.map(event => event.type)).toEqual([
+    expect(session.snapshotEvents().map(event => event.type)).toEqual([
       'goal/change', 'goal/change', 'goal/change',
     ])
     expect(ctx.goals.get(agent)).toMatchObject({ revision: 3, phase: 'paused' })
-    expect(foldGoal(session.events)).toMatchObject({ goal: { revision: 3, phase: 'paused' } })
+    expect(foldGoal(session.snapshotEvents())).toMatchObject({ goal: { revision: 3, phase: 'paused' } })
   })
 
   it('publishes a mutation consistently to a reentrant session observer', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(GoalService)
-    const stub = stubAgentForSession(ctx.sessions.create(SessionId('goal-reentrant-observer')))
+    const stub = stubAgentForSession(ctx.sessions.create(SessionId('goal-reentrant-observer')), ctx)
     ctx.agents.register(stub.agent)
     let observed: ReturnType<GoalService['get']>
     ctx.on('session/event', (session, event) => {
@@ -435,12 +482,13 @@ describe('GoalService mutations', () => {
 
     expect(observed).toEqual(created)
     expect(ctx.goals.get(stub.agent)).toEqual(created)
-    expect(foldGoal(stub.session.events)).toMatchObject({ goal: { id: created.id, revision: 1 } })
+    expect(foldGoal(stub.session.snapshotEvents())).toMatchObject({ goal: { id: created.id, revision: 1 } })
   })
 
   it('does not delegate goal persistence to agent injection', async () => {
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(GoalService)
     const stub = stubAgent('goal-independent-injection')
     stub.agent.inject = () => { throw new Error('injection must not be called') }
@@ -451,26 +499,27 @@ describe('GoalService mutations', () => {
       revision: 1,
     })
     expect(stub.agent.inbox.nextStep).toEqual([])
-    expect(stub.session.events.map(event => event.type)).toEqual(['goal/change'])
+    expect(stub.session.snapshotEvents().map(event => event.type)).toEqual(['goal/change'])
   })
 
-  it('observes a valid goal snapshot appended after an empty cache was established', async () => {
+  it('observes an external goal change and disarms local activation', async () => {
     const { ctx, agent, session } = await harness()
-    expect(ctx.goals.get(agent)).toBeUndefined()
+    const created = ctx.goals.create(agent, { objective: 'before external edit', maxGoalRounds: 4 })
+    expect(created.activation).toBe('armed')
     const change: GoalSnapshotChangeMeta = {
       kind: 'goal/change',
       version: 1,
-      operation: 'create',
+      operation: 'edit',
       goal: {
-        id: GoalId('goal-external'),
-        revision: 1,
+        id: created.id,
+        revision: created.revision + 1,
         objective: 'observe external append',
         phase: 'active',
         maxGoalRounds: 4,
       },
-      roundsStarted: 0,
-      createdAt: 12,
-      updatedAt: 12,
+      roundsStarted: created.roundsStarted,
+      createdAt: created.createdAt,
+      updatedAt: created.updatedAt,
     }
     session.append('goal/change', change)
 
@@ -481,7 +530,7 @@ describe('GoalService mutations', () => {
     })
   })
 
-  it('reports the same corrupt unseen event after committing its valid prefix', async () => {
+  it('rejects a corrupt append while preserving the valid prefix', async () => {
     const { ctx, agent, session } = await harness()
     expect(ctx.goals.get(agent)).toBeUndefined()
     const change: GoalSnapshotChangeMeta = {
@@ -500,10 +549,11 @@ describe('GoalService mutations', () => {
       updatedAt: 12,
     }
     session.append('goal/change', change)
-    session.append('goal/change', { ...change, operation: 'edit', extra: true } as never)
+    expect(() => {
+      session.append('goal/change', { ...change, operation: 'edit', extra: true } as never)
+    }).toThrow('snapshot change must have exactly')
 
-    expect(() => ctx.goals.get(agent)).toThrow('snapshot change must have exactly')
-    expect(() => ctx.goals.get(agent)).toThrow('snapshot change must have exactly')
+    expect(ctx.goals.get(agent)).toMatchObject({ id: change.goal.id, objective: 'valid prefix' })
   })
 })
 
@@ -534,7 +584,7 @@ describe('goal replay validation', () => {
   function oneChange(change: GoalChangeMeta) {
     const session = Session.create(SessionId(`validation-${Math.random()}`))
     appendChange(session, change)
-    return session.events
+    return session.snapshotEvents()
   }
 
   function mutation(
@@ -565,22 +615,22 @@ describe('goal replay validation', () => {
     const change = snapshotChange()
     const session = Session.create(SessionId('inbox-independent-change'))
     appendChange(session, change)
-    expect(foldGoal(session.events)).toMatchObject({ goal: { id: change.goal.id, revision: 1 } })
+    expect(foldGoal(session.snapshotEvents())).toMatchObject({ goal: { id: change.goal.id, revision: 1 } })
     const message = createUserMessage({
       content: [{ type: 'text', text: 'unrelated pending context' }],
       source: { kind: 'plugin', plugin: 'test' },
     })
-    const inbox = new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} })
+    const inbox = stubAgentForSession(session).agent.inbox
     inbox.append('next-step', message)
     expect(inbox.remove(message.id)).toBe(true)
-    expect(foldGoal(session.events)).toMatchObject({ goal: { id: change.goal.id, revision: 1 } })
+    expect(foldGoal(session.snapshotEvents())).toMatchObject({ goal: { id: change.goal.id, revision: 1 } })
   })
 
   function foldPair(first: GoalSnapshotChangeMeta, second: GoalChangeMeta): ReturnType<typeof foldGoal> {
     const session = Session.create(SessionId(`validation-pair-${Math.random()}`))
     appendChange(session, first)
     appendChange(session, second)
-    return foldGoal(session.events)
+    return foldGoal(session.snapshotEvents())
   }
 
   it('ignores unrelated metadata and non-goal round sources', () => {
@@ -591,7 +641,7 @@ describe('goal replay validation', () => {
       content: [{ type: 'text', text: 'other' }],
       source: { kind: 'plugin', plugin: 'test' },
     }))
-    expect(foldGoal(session.events)).toEqual({ roundsStarted: 0 })
+    expect(foldGoal(session.snapshotEvents())).toEqual({ roundsStarted: 0 })
     const source = { kind: 'plugin', plugin: 'ordinary-user-message' } as const
     const turn = nextTurn(session)
     session.append('turn/start', { turn })
@@ -599,14 +649,14 @@ describe('goal replay validation', () => {
       content: [{ type: 'text', text: 'ordinary' }], source,
     }), { surfaceOp: 'append' })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
-    expect(foldGoal(session.events)).toEqual({ roundsStarted: 0 })
+    expect(foldGoal(session.snapshotEvents())).toEqual({ roundsStarted: 0 })
   })
 
   it('rejects rounds attributed to another goal', () => {
     const change = snapshotChange()
     const session = Session.create(SessionId('other-goal-round'), oneChange(change))
     appendRound(session, { id: GoalId('goal-other'), revision: 1 }, 1)
-    expect(() => foldGoal(session.events)).toThrow('not the next admitted round')
+    expect(() => foldGoal(session.snapshotEvents())).toThrow('not the next admitted round')
   })
 
   it('rejects unsupported versions, operations, and extra top-level fields', () => {
@@ -682,7 +732,7 @@ describe('goal replay validation', () => {
     appendRound(session, base.goal, 2)
     appendChange(session, { ...paused, roundsStarted: 2 })
     appendChange(session, exhausted)
-    expect(() => foldGoal(session.events)).toThrow('exhausted round budget')
+    expect(() => foldGoal(session.snapshotEvents())).toThrow('exhausted round budget')
   })
 
   it('rejects invalid clear continuity and goal id reuse', () => {
@@ -706,7 +756,7 @@ describe('goal replay validation', () => {
     appendChange(completedSession, base)
     appendChange(completedSession, complete)
     appendChange(completedSession, sameCurrentId)
-    expect(() => foldGoal(completedSession.events)).toThrow('fresh active revision-one')
+    expect(() => foldGoal(completedSession.snapshotEvents())).toThrow('fresh active revision-one')
 
     const second = snapshotChange({
       goal: { ...base.goal, id: GoalId('goal-second') },
@@ -720,7 +770,7 @@ describe('goal replay validation', () => {
     appendChange(nonAdjacentReuse, second)
     appendChange(nonAdjacentReuse, secondComplete)
     appendChange(nonAdjacentReuse, { ...sameCurrentId, createdAt: 30, updatedAt: 30 })
-    expect(() => foldGoal(nonAdjacentReuse.events)).toThrow('fresh active revision-one')
+    expect(() => foldGoal(nonAdjacentReuse.snapshotEvents())).toThrow('fresh active revision-one')
 
     const clear: GoalChangeMeta = {
       kind: 'goal/change', version: 1, operation: 'clear', cleared: { id: base.goal.id, revision: 2 }, clearedAt: 11,
@@ -729,7 +779,7 @@ describe('goal replay validation', () => {
     appendChange(clearedSession, base)
     appendChange(clearedSession, clear)
     appendChange(clearedSession, sameCurrentId)
-    expect(() => foldGoal(clearedSession.events)).toThrow('fresh active revision-one')
+    expect(() => foldGoal(clearedSession.snapshotEvents())).toThrow('fresh active revision-one')
   })
 
   it('rejects non-positive goal round sources', () => {
@@ -741,7 +791,7 @@ describe('goal replay validation', () => {
       content: [{ type: 'text', text: 'missing' }], source,
     }), { surfaceOp: 'append' })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
-    expect(() => foldGoal(session.events)).toThrow('goal message source is invalid')
+    expect(() => foldGoal(session.snapshotEvents())).toThrow('goal message source is invalid')
   })
 
   it('rejects malformed snapshots, refs, counters, and timestamps', () => {
@@ -788,7 +838,7 @@ describe('goal replay validation', () => {
       clearedAt: 20,
     }
     appendChange(session, clear)
-    expect(foldGoal(session.events)).toEqual({
+    expect(foldGoal(session.snapshotEvents())).toEqual({
       roundsStarted: 0,
       lastRef: { id: change.goal.id, revision: 2 },
     })

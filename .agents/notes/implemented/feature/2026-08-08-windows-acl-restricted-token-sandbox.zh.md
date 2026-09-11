@@ -28,7 +28,7 @@ AppContainer 令牌没有环境读访问：每个可读路径都必须预先通�
 
 ### 为什么不选 landstrip？
 
-[landstrip 评估](../../rejected/feature/2026-07-26-evaluate-landstrip-for-windows-sandbox-rung.zh.md)在实现前已被否决（未经实战检验；自建 launcher 方案胜出），且其 Windows 后端是 AppContainer 形态，继承同样的任意路径读问题。
+landstrip 评估在实现前已被否决（未经实战检验；自建 launcher 方案胜出），且其 Windows 后端是 AppContainer 形态，继承同样的任意路径读问题。
 
 ## 后果
 
@@ -40,4 +40,4 @@ AppContainer 令牌没有环境读访问：每个可读路径都必须预先通�
 
 ## Related
 
-[pwsh 执行器决策](2026-08-01-pwsh-tool-and-executor.zh.md)拥有本档所消费的 pwsh-sandbox/tool-pwsh 方言划分。
+[pwsh 执行器决策](../../archived/feature/2026-08-01-pwsh-tool-and-executor.md)拥有本档所消费的 pwsh-sandbox/tool-pwsh 方言划分。

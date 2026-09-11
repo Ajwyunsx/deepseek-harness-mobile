@@ -18,10 +18,10 @@
       "path": "../subprocess"
     },
     {
-      "path": "../../util/timeout"
+      "path": "../win32-process"
     },
     {
-      "path": "../../runtime-diagnostics/invariants"
+      "path": "../../util/timeout"
     }
   ]
 }

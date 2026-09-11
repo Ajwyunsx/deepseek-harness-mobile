@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Button, ConnectionBanner, Input, Menu, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, ConnectionIndicator, Input, Menu, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { POINTER_GRACE_MS } from '../src/pointer-grace.ts'
 
 afterEach(cleanup)
@@ -97,6 +97,27 @@ describe('Menu', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
+  it('window blur closes only when focus moved into an iframe', () => {
+    const onClose = vi.fn()
+    render(
+      <Menu open anchor={<span>trigger</span>} items={items} onSelect={() => {}} onClose={onClose} />)
+    // An app or tab switch blurs the window without focusing an iframe: stays open.
+    fireEvent.blur(window)
+    expect(onClose).not.toHaveBeenCalled()
+    // A pointerdown inside a cross-origin iframe never reaches this document;
+    // the focus move it causes is the one signal left, and it closes.
+    const iframe = document.createElement('iframe')
+    document.body.appendChild(iframe)
+    try {
+      iframe.focus()
+      expect(document.activeElement).toBe(iframe)
+      fireEvent.blur(window)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      iframe.remove()
+    }
+  })
+
   it('selected item shows the trailing check; align=end, side=top, and className apply', () => {
     const { container } = render(
       <Menu
@@ -118,6 +139,24 @@ describe('Menu', () => {
     const other = screen.getByRole('menuitem', { name: 'Beta' })
     expect(other.querySelector('svg')).toBeNull()
     fireEvent.keyDown(document, { key: 'a' })
+  })
+
+  it('fill selection holds the row fill instead of a trailing check', () => {
+    render(
+      <Menu
+        open
+        selection="fill"
+        anchor={<span>trigger</span>}
+        items={items}
+        selectedId="a"
+        onSelect={() => {}}
+        onClose={() => {}}
+      />)
+    const selected = screen.getByRole('menuitem', { name: 'Alpha' })
+    expect(selected.querySelector('svg')).toBeNull()
+    expect(selected.className).toMatch(/selectedFill/)
+    const other = screen.getByRole('menuitem', { name: 'Beta' })
+    expect(other.className).not.toMatch(/selectedFill/)
   })
 
   it('renders a leading icon and a separator between groups', () => {
@@ -383,7 +422,7 @@ describe('Modal', () => {
   it('is absent while closed; Escape and mask click call onClose', () => {
     const onClose = vi.fn()
     const { rerender } = render(
-      <Modal open={false} onClose={onClose} title="Create new workspace">body</Modal>)
+      <Modal open={false} onClose={onClose} title="Create new workspace" closeLabel="Close">body</Modal>)
     expect(screen.queryByRole('dialog')).toBeNull()
     rerender(
       <Modal open onClose={onClose} title="Create new workspace" closeLabel="Configure later" description="Name it." contentClassName="scrolling-content" footer={<button type="button">Create</button>}>
@@ -406,13 +445,50 @@ describe('Modal', () => {
     fireEvent.click(mask)
     expect(onClose).toHaveBeenCalledTimes(2)
   })
+
+  it('renders headless content without the default close chrome', () => {
+    render(
+      <Modal open onClose={() => {}} title="Custom surface" headless>
+        <span>Custom body</span>
+      </Modal>,
+    )
+    expect(screen.getByRole('dialog', { name: 'Custom surface' })).toBeDefined()
+    expect(screen.getByText('Custom body')).toBeDefined()
+    expect(screen.queryByRole('button')).toBeNull()
+  })
 })
 
-describe('ConnectionBanner', () => {
-  it('renders only while reconnecting', () => {
-    const { container, rerender } = render(<ConnectionBanner reconnecting={false} />)
+describe('ConnectionIndicator', () => {
+  it('renders outage, attempt progress, and recovered states without a native tooltip', () => {
+    const reconnect = vi.fn()
+    const labels = {
+      disconnectedLabel: 'Disconnected',
+      reconnectLabel: 'Reconnect',
+      connectingLabel: 'Connecting',
+      recoveredLabel: 'Connected',
+      reconnectActionLabel: 'Disconnected, reconnect now',
+      restartActionLabel: 'Connecting, restart now',
+      onReconnect: reconnect,
+    }
+    const { container, rerender } = render(
+      <ConnectionIndicator state={undefined} {...labels} />,
+    )
     expect(container.firstChild).toBeNull()
-    rerender(<ConnectionBanner reconnecting />)
-    expect(container.textContent).toContain('重连')
+    rerender(<ConnectionIndicator state="disconnected" {...labels} />)
+    const indicator = screen.getByRole('button', { name: 'Disconnected, reconnect now' })
+    expect(indicator.textContent).toContain('Disconnected')
+    expect(indicator.textContent).toContain('Reconnect')
+    expect(indicator.hasAttribute('title')).toBe(false)
+    expect(indicator.querySelector('svg')).toBeTruthy()
+    fireEvent.click(indicator)
+    expect(reconnect).toHaveBeenCalledOnce()
+
+    rerender(<ConnectionIndicator state="connecting" {...labels} />)
+    expect(screen.getByRole('button', { name: 'Connecting, restart now' }).textContent)
+      .toContain('Connecting...')
+
+    rerender(<ConnectionIndicator state="recovered" {...labels} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeTruthy()
   })
 })

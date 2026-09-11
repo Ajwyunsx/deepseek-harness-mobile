@@ -5,7 +5,7 @@
 // target — outside searchRoot. The package-level jsdom test cannot replay
 // that continuation (fireEvent does not re-bubble through listeners mounted
 // mid-dispatch), so the guard that keeps the gesture alive
-// (.agents/notes/implemented/bug-fix/2026-08-18-rail-search-outside-click-self-dismissal.md)
+// (.agents/notes/archived/bug-fix/2026-08-18-rail-search-outside-click-self-dismissal.md)
 // is pinned here, in the assembled application under a real browser click.
 //
 // Zero model calls: collapsing the sidebar and expanding the search are pure
@@ -30,7 +30,7 @@ describe('web e2e: rail search click survives its own document-level bubble', ()
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     tripwire = watchConsole(page)
-    await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
+    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
   }, 120_000)
 

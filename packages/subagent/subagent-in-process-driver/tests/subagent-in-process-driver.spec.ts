@@ -1,4 +1,4 @@
-import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent, type AgentOptions } from '@deepseek-ai/dsh-agent'
@@ -31,7 +31,7 @@ async function setup(script: Script, parentOptions: Partial<AgentOptions> = {}) 
   await ctx.plugin(SubagentRuntime)
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
-  const parent = ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock', ...parentOptions })
+  const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock', ...parentOptions })
   return { ctx, parent, adapter }
 }
 
@@ -69,7 +69,7 @@ describe('startInProcessRun', () => {
 
   it('uses explicit child model selectors when the parent has none and preserves its cwd', async () => {
     const { ctx } = await setup([textResponse('driver answer')])
-    const parent = ctx.agentLoop.create(SessionId('bare-parent'), {}, { cwd: '/workspace' })
+    const parent = await ctx.agentLoop.create(SessionId('bare-parent'), {}, { cwd: '/workspace' })
     const run = await startInProcessRun({
       ...request(parent),
       agentOptions: { provider: 'mock', model: 'mock' },
@@ -150,7 +150,7 @@ describe('startInProcessRun', () => {
     let injected = false
     ctx.on('session/flush', (session) => {
       if (injected || session.header.parentSession === undefined) return
-      const lastEnd = session.events.findLast(event => event.type === 'turn/end')
+      const lastEnd = session.snapshotEvents().findLast(event => event.type === 'turn/end')
       if (lastEnd?.type !== 'turn/end' || lastEnd.data.reason.kind !== 'max-tokens') return
       injected = true
       session.append('user/message', createUserMessage({
@@ -164,7 +164,7 @@ describe('startInProcessRun', () => {
     const child = ctx.agents.get(run.id)!
 
     expect(injected).toBe(false)
-    expect(child.session.events.findLast(event => event.type === 'turn/end'))
+    expect(child.session.snapshotEvents().findLast(event => event.type === 'turn/end'))
       .toMatchObject({ data: { reason: { kind: 'max-tokens' } } })
     expect(result.stopReason).toBe('max-tokens')
     await run.dispose()
@@ -177,8 +177,8 @@ describe('startInProcessRun', () => {
       toolCallResponse('t1', 'noop', {}, 'partial one'),
       [
         { type: 'block-start', index: 0, blockType: 'tool-call' },
-        { type: 'tool-call-delta', index: 0, id: CallId('t2'), name: 'noop', argumentsDelta: '{}' },
-        { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId('t2'), name: 'noop', arguments: '{}' } },
+        { type: 'tool-call-delta', index: 0, id: ToolCallId('t2'), name: 'noop', argumentsDelta: '{}' },
+        { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('t2'), name: 'noop', arguments: '{}' } },
         { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
         { type: 'finish', reason: { kind: 'max-tokens' } },
       ],
@@ -199,13 +199,47 @@ describe('startInProcessRun', () => {
     const { ctx, parent } = await setup([textResponse('parent answer'), textResponse('child answer')])
     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'parent question' }], source: { kind: 'user' } }))
     await parent.whenIdle()
-    const seed = parent.session.events.slice()
+    const seed = parent.session.snapshotEvents()
     const run = await startInProcessRun(request(parent), { seed })
     const result = await run.result
     expect(text(result.output)).toBe('child answer')
     const child = ctx.agents.get(run.id)!
-    expect(child.session.header.seedLength).toBe(seed.length)
-    expect(child.session.events.slice(0, seed.length)).toEqual(seed)
+    expect(child.session.header.isSeeded).toBe(true)
+    expect(child.session.inheritedEventCount).toBe(seed.length)
+    expect(child.session.snapshotEvents().slice(0, seed.length)).toEqual(seed)
+    // The seeded `system/message` stays surface node 0: the child renders the
+    // same prompt, so its loop appends no second system node.
+    const seededSystem = seed.find(event => event.type === 'system/message')
+    expect(seededSystem).toBeDefined()
+    expect(child.session.snapshotEvents().filter(event => event.type === 'system/message')).toHaveLength(1)
+    expect(child.session.surface.nodes[0]).toBe(seededSystem?.seq)
+    expect(child.session.deriveMessages()[0]).toEqual(parent.session.deriveMessages()[0])
+    await run.dispose()
+  })
+
+  it('replaces a seeded system node in place when the forked child renders a different prompt', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('parent answer'), textResponse('child answer')])
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'parent question' }], source: { kind: 'user' } }))
+    await parent.whenIdle()
+    const seed = parent.session.snapshotEvents()
+    const seededSystem = seed.find(event => event.type === 'system/message')
+    if (seededSystem === undefined) throw new Error('the parent log lacks a system node')
+    ctx.systemPrompt.section({ name: 'test:after-fork', order: 10, text: 'Registered after the fork seed.' })
+
+    const run = await startInProcessRun(request(parent), { seed })
+    await run.result
+    const child = ctx.agents.get(run.id)!
+    const systemNodes = child.session.snapshotEvents().filter(event => event.type === 'system/message')
+    expect(systemNodes.map(event => event.seq)).toEqual([seededSystem.seq, systemNodes[1]?.seq])
+    expect(systemNodes[1]?.surfaceOp).toEqual({ op: 'replace', startSeq: seededSystem.seq, endSeq: seededSystem.seq })
+    expect(systemNodes[1]?.sourceEventSeqs).toEqual([seededSystem.seq])
+    expect(child.session.surface.nodes[0]).toBe(systemNodes[1]?.seq)
+    const childRequest = adapter.requests.at(-1)!
+    expect(childRequest.system).toBeUndefined()
+    expect(childRequest.messages[0]).toMatchObject({
+      role: 'system',
+      content: [{ type: 'text', text: expect.stringContaining('Registered after the fork seed.') as unknown }],
+    })
     await run.dispose()
   })
 
@@ -304,7 +338,7 @@ describe('startInProcessRun', () => {
     // no provider/model is fabricated, so the child's turn errors for want of a
     // route rather than silently adopting one.
     const { ctx } = await setup([])
-    const parent = ctx.agentLoop.create(SessionId('routeless-parent'), {})
+    const parent = await ctx.agentLoop.create(SessionId('routeless-parent'), {})
     const run = await startInProcessRun(request(parent), {})
     const child = ctx.agents.get(run.id)!
     expect(child.options).toEqual({ subagentDepth: 1 })
@@ -326,7 +360,7 @@ describe('startInProcessRun', () => {
     })
     expect(adapter.requests[0]?.signal?.reason).toEqual({ kind: 'parent' })
     const child = parent.ctx.agents.get(signalled.id)
-    const turnEnd = child?.session.events.findLast(event => event.type === 'turn/end')
+    const turnEnd = child?.session.snapshotEvents().findLast(event => event.type === 'turn/end')
     expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason).toEqual({ kind: 'aborted', reason: { kind: 'parent' } })
     await signalled.dispose()
 

@@ -15,7 +15,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -30,7 +30,7 @@ let callCounter = 0
 function call(name: string, args: unknown, agentObj?: object) {
   return ctx.tools.execute({
     signal: testToolSignal,
-    callId: CallId(`it-${++callCounter}`),
+    callId: ToolCallId(`it-${++callCounter}`),
     name,
     arguments: args,
     ...agentObj ? { agent: agentObj as never } : {},
@@ -180,7 +180,7 @@ describe('search tools over the real subprocess service + the packaged rg', () =
       const controller = new AbortController()
       controller.abort()
       const result = await ctx.tools.execute({
-        callId: CallId(`it-${++callCounter}`),
+        callId: ToolCallId(`it-${++callCounter}`),
         name: 'grep',
         arguments: { pattern: 'x' },
         signal: controller.signal,
@@ -189,12 +189,13 @@ describe('search tools over the real subprocess service + the packaged rg', () =
       expect(result.error).toMatchObject({ info: { name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH } })
     })
 
-    it('an unusable session cwd (spawn failure) is SEARCH_FAILED', async () => {
+    it('an unusable session cwd provider rejection is SEARCH_FAILED', async () => {
       const gone = join(dir, 'deleted-session-dir')
       const result = await call('glob', { pattern: '*' }, { session: { header: { id: 'session-int', cwd: gone } } })
       expect(result.isError).toBe(true)
       expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
-      expect(text(result)).toContain('could not start')
+      expect(text(result)).toContain('subprocess failed before reporting an outcome')
+      expect(text(result)).not.toContain('could not start')
     })
   })
 })

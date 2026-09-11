@@ -27,6 +27,7 @@ import {
   probe,
   probeNoFollow,
   readForEdit,
+  readByteWindow,
   readTextForDiff,
   readWholeBytes,
   readWholeText,
@@ -114,6 +115,10 @@ export class LocalFileSystem extends FileSystem {
     return String(target.targetKey)
   }
 
+  override processPathFromHostPath(hostPath: string): string | undefined {
+    return isAbsolute(hostPath) ? resolve(hostPath) : undefined
+  }
+
   override fileUrl(target: FsTarget): string {
     return pathToFileURL(this.processPath(target)).href
   }
@@ -150,6 +155,10 @@ export class LocalFileSystem extends FileSystem {
 
   override async readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array> {
     return readWholeBytes({ displayPath: target.displayPath, targetKey: target.targetKey }, signal, maxBytes, this.internals)
+  }
+
+  override async readByteRange(target: FsTarget, range: { offset: number; length: number }, signal?: AbortSignal): Promise<Uint8Array> {
+    return readByteWindow({ displayPath: target.displayPath, targetKey: target.targetKey }, range, signal)
   }
 
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {

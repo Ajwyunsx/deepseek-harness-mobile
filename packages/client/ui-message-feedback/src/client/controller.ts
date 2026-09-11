@@ -7,38 +7,15 @@
  * @module @deepseek-ai/dsh-client-ui-message-feedback/client/controller
  */
 
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MessageId, SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { MessageId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { FeedbackRecord } from '@deepseek-ai/dsh-command-feedback/types'
 import type {
-  MessageFeedbackDeleteResult,
   MessageFeedbackItem,
-  MessageFeedbackListResult,
-  MessageFeedbackPutResult,
   MessageFeedbackRating,
 } from '@deepseek-ai/dsh-message-feedback/types'
-
-/**
- * The three Remote calls this controller needs. The generated face wraps every
- * business result in {@link RemoteResult}: a carrier failure arrives as the
- * `ok: false` branch rather than a rejection, so this controller reads one
- * envelope and never wraps a call to recover a transport error.
- */
-export interface MessageFeedbackRemote {
-  list: (request: { sessionId: SessionId }) => Promise<RemoteResult<MessageFeedbackListResult>>
-  put: (request: {
-    sessionId: SessionId
-    messageId: MessageId
-    rating: MessageFeedbackRating
-    note?: string
-    ifVersion: MessageFeedbackItem['version'] | null
-  }) => Promise<RemoteResult<MessageFeedbackPutResult>>
-  delete: (request: {
-    sessionId: SessionId
-    messageId: MessageId
-    ifVersion: MessageFeedbackItem['version']
-  }) => Promise<RemoteResult<MessageFeedbackDeleteResult>>
-}
 
 /** Load state of the one list read that seeds every per-message control. */
 export type MessageFeedbackStatus = 'cold' | 'loading' | 'ready' | 'error'
@@ -52,10 +29,19 @@ export interface MessageFeedbackView {
   error: string | null
 }
 
+/** Rejected branch shared by every settled action. */
+export interface MessageFeedbackActionFailure {
+  ok: false
+  error: { code: string; message: string }
+}
+
 /** Settled action shape rendered by the message-level controls. */
-export type MessageFeedbackActionResult =
-  | { ok: true }
-  | { ok: false; error: { code: string; message: string } }
+export type MessageFeedbackActionResult = { ok: true } | MessageFeedbackActionFailure
+
+/** A settled toggle, carrying the rating now committed so the control can tell a record from a retraction. */
+export type MessageFeedbackToggleResult =
+  | { ok: true; rating: MessageFeedbackRating | null }
+  | MessageFeedbackActionFailure
 
 // `Object.freeze` does not protect a Map: `set`/`delete` write internal slots,
 // not properties. Immutability here is by discipline instead — the view type is
@@ -71,13 +57,17 @@ const INITIAL_VIEW: MessageFeedbackView = Object.freeze({
 
 const OK: MessageFeedbackActionResult = Object.freeze({ ok: true })
 
-const DISPOSED: MessageFeedbackActionResult = Object.freeze({
+const DISPOSED: MessageFeedbackActionFailure = Object.freeze({
   ok: false,
   error: Object.freeze({ code: 'disposed', message: 'feedback controller is disposed' }),
 })
 
-/** Human-readable text for one business failure code. */
-function describe(code: string): string {
+/**
+ * Human-readable text for one business failure code.
+ * @param code - the Host's business failure code.
+ * @returns the developer-facing description carried in the failure branch.
+ */
+export function describe(code: string): string {
   switch (code) {
     case 'session-not-found': return 'this session is no longer persisted'
     case 'target-not-found': return 'this message is not a persisted assistant message'
@@ -89,12 +79,12 @@ function describe(code: string): string {
 }
 
 /** Build the rejected branch for one business failure code. */
-function fail(code: string): MessageFeedbackActionResult {
+function fail(code: string): MessageFeedbackActionFailure {
   return { ok: false, error: { code, message: describe(code) } }
 }
 
 /** Carrier failure rendered with the Host-supplied code and message. */
-function carrierFailure(error: { code: string; message: string }): MessageFeedbackActionResult {
+function carrierFailure(error: { code: string; message: string }): MessageFeedbackActionFailure {
   return { ok: false, error: { code: error.code, message: error.message } }
 }
 
@@ -110,11 +100,11 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
   private disposed = false
 
   /**
-   * @param remote - the messageFeedback Remote namespace.
+   * @param ctx - the browser plugin context carrying the messageFeedback Remote namespace.
    * @param sessionId - Session owning every addressed assistant message.
    */
   constructor(
-    private readonly remote: MessageFeedbackRemote,
+    private readonly ctx: ClientContext,
     private readonly sessionId: SessionId,
   ) {}
 
@@ -167,26 +157,21 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
 
   /**
    * Create or replace feedback for one message, comparing against the version
-   * this controller last observed.
-   *
-   * The note is resolved here rather than by the caller: `mutate` awaits the
-   * one list read first, so this body always sees the committed item, while a
-   * control that rendered before that read completed would still be holding
-   * `undefined`. Omitting `note` therefore keeps whatever is stored; only
-   * {@link clearNote} removes one.
+   * this controller last observed. The item stores exactly `entry`: an entry
+   * without a note or category replaces whatever the stored item carried.
    * @param messageId - target assistant message.
    * @param rating - desired judgment.
-   * @param note - replacement explanation; omitted keeps the stored note.
+   * @param entry - explanation and category to store with the judgment.
    * @returns the settled mutation result.
    */
   rate(
     messageId: MessageId,
     rating: MessageFeedbackRating,
-    note?: string,
+    entry: FeedbackRecord = {},
   ): Promise<MessageFeedbackActionResult> {
     return this.mutate(async () => {
       const observed = this.view.items.get(messageId)
-      return await this.putCommitted(messageId, rating, note ?? observed?.note, observed)
+      return await this.putCommitted(messageId, rating, entry, observed)
     })
   }
 
@@ -195,43 +180,20 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
    * the committed rating already matches. The decision reads the committed item
    * inside the serialized mutation, so a click that lands before the first list
    * read still toggles against the stored value rather than the empty view a
-   * cold control rendered.
+   * cold control rendered. A replacement stores the bare judgment; the note
+   * and category of the judgment it replaces do not carry over.
    * @param messageId - target assistant message.
    * @param rating - the judgment the human asked for.
-   * @returns the settled mutation result.
+   * @returns the settled mutation result with the rating now committed.
    */
-  toggle(messageId: MessageId, rating: MessageFeedbackRating): Promise<MessageFeedbackActionResult> {
+  toggle(messageId: MessageId, rating: MessageFeedbackRating): Promise<MessageFeedbackToggleResult> {
     return this.mutate(async () => {
       const observed = this.view.items.get(messageId)
-      if (observed?.rating === rating) return await this.deleteCommitted(messageId, observed)
-      return await this.putCommitted(messageId, rating, observed?.note, observed)
-    })
-  }
-
-  /**
-   * Drop the note while keeping the rating. Absent feedback needs no call.
-   * @param messageId - target assistant message.
-   * @returns the settled mutation result.
-   */
-  clearNote(messageId: MessageId): Promise<MessageFeedbackActionResult> {
-    return this.mutate(async () => {
-      const observed = this.view.items.get(messageId)
-      if (observed === undefined || observed.note === undefined) return OK
-      return await this.putCommitted(messageId, observed.rating, undefined, observed)
-    })
-  }
-
-  /**
-   * Remove feedback for one message. A message with no known item is already
-   * in the requested state, so no call is made.
-   * @param messageId - target assistant message.
-   * @returns the settled mutation result.
-   */
-  clear(messageId: MessageId): Promise<MessageFeedbackActionResult> {
-    return this.mutate(async () => {
-      const observed = this.view.items.get(messageId)
-      if (observed === undefined) return OK
-      return await this.deleteCommitted(messageId, observed)
+      const retract = observed?.rating === rating
+      const result = retract
+        ? await this.deleteCommitted(messageId, observed)
+        : await this.putCommitted(messageId, rating, {}, observed)
+      return result.ok ? { ok: true, rating: retract ? null : rating } : result
     })
   }
 
@@ -239,14 +201,15 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
   private async putCommitted(
     messageId: MessageId,
     rating: MessageFeedbackRating,
-    note: string | undefined,
+    entry: FeedbackRecord,
     observed: MessageFeedbackItem | undefined,
   ): Promise<MessageFeedbackActionResult> {
-    const carried = await this.remote.put({
+    const carried = await this.ctx.remote.messageFeedback.put({
       sessionId: this.sessionId,
       messageId,
       rating,
-      ...(note === undefined ? {} : { note }),
+      ...(entry.text === undefined ? {} : { note: entry.text }),
+      ...(entry.category === undefined ? {} : { category: entry.category }),
       ifVersion: observed?.version ?? null,
     })
     if (!carried.ok) return carrierFailure(carried.error)
@@ -264,7 +227,7 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
     messageId: MessageId,
     observed: MessageFeedbackItem,
   ): Promise<MessageFeedbackActionResult> {
-    const carried = await this.remote.delete({
+    const carried = await this.ctx.remote.messageFeedback.delete({
       sessionId: this.sessionId,
       messageId,
       ifVersion: observed.version,
@@ -287,40 +250,32 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
 
   /** Fetch the whole sidecar and publish it as the seeded view. */
   private async load(): Promise<MessageFeedbackActionResult> {
-    try {
-      const carried = await this.remote.list({ sessionId: this.sessionId })
-      if (this.disposed) return OK
-      if (!carried.ok) {
-        this.publish({ status: 'error', items: this.view.items, error: carried.error.message })
-        return carrierFailure(carried.error)
-      }
-      const result = carried.value
-      if (!result.ok) {
-        this.publish({ status: 'error', items: this.view.items, error: describe(result.error.code) })
-        return fail(result.error.code)
-      }
-      const items = new Map<MessageId, MessageFeedbackItem>()
-      for (const item of result.value.items) items.set(item.messageId, item)
-      this.publish({ status: 'ready', items, error: null })
-      return OK
-    } catch (error) {
-      if (this.disposed) return OK
-      const message = error instanceof Error ? error.message : 'message feedback list failed'
-      this.publish({ status: 'error', items: this.view.items, error: message })
-      return { ok: false, error: { code: 'transport', message } }
+    const carried = await this.ctx.remote.messageFeedback.list({ sessionId: this.sessionId })
+    if (this.disposed) return OK
+    if (!carried.ok) {
+      this.publish({ status: 'error', items: this.view.items, error: carried.error.message })
+      return carrierFailure(carried.error)
     }
+    const result = carried.value
+    if (!result.ok) {
+      this.publish({ status: 'error', items: this.view.items, error: describe(result.error.code) })
+      return fail(result.error.code)
+    }
+    const items = new Map<MessageId, MessageFeedbackItem>()
+    for (const item of result.value.items) items.set(item.messageId, item)
+    this.publish({ status: 'ready', items, error: null })
+    return OK
   }
 
   /**
    * Serialize one mutation behind this Session's prior mutation so queued
-   * operations always compare against the committed version, and translate a
-   * transport throw into the same settled shape the controls already render.
+   * operations always compare against the committed version.
    */
-  private mutate(
-    operation: () => Promise<MessageFeedbackActionResult>,
+  private mutate<T>(
+    operation: () => Promise<T>,
     options: { readonly seed?: boolean } = {},
-  ): Promise<MessageFeedbackActionResult> {
-    const guarded = async (): Promise<MessageFeedbackActionResult> => {
+  ): Promise<T | MessageFeedbackActionFailure> {
+    const guarded = async (): Promise<T | MessageFeedbackActionFailure> => {
       if (this.disposed) return DISPOSED
       if (options.seed !== false) {
         const loaded = await this.ensure()
@@ -330,17 +285,7 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
         // oxlint-disable-next-line typescript/no-unnecessary-condition -- dispose() can run during the await.
         if (this.disposed) return DISPOSED
       }
-      try {
-        return await operation()
-      } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: 'transport',
-            message: error instanceof Error ? error.message : 'message feedback mutation failed',
-          },
-        }
-      }
+      return await operation()
     }
     const result = this.operationTail.then(guarded, guarded)
     // `guarded` settles every carrier and business failure as a

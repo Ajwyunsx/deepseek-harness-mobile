@@ -40,19 +40,15 @@ const ROOT_MANIFEST = 'package.json'
 
 /** One manifest the bump rewrites, and the tag its new version will carry. */
 interface PlannedVersion {
-  /** Repository-relative manifest path. */
   readonly manifestPath: string
-  /** Label for the log line. */
   readonly label: string
-  /** The version the manifest currently carries. */
   readonly from: string
-  /** The version to write. */
   readonly to: string
   /** The tag this version publishes from, or undefined for a non-published manifest. */
   readonly tag: string | undefined
 }
 
-/** One private dsh package whose version follows the publishable family. */
+/** One private dsh workspace whose version follows the publishable family. */
 interface PrivateDshVersion {
   /** Repository-relative manifest path. */
   readonly manifestPath: string
@@ -247,13 +243,13 @@ function rootVersion(root: string): string {
 }
 
 /**
- * Discover private package manifests that share the dsh version without joining
- * its publish set.
+ * Discover private package and application manifests that share the dsh version
+ * without joining its publish set.
  * @param root - repository root.
- * @returns Private package manifests sorted by path.
+ * @returns Private workspace manifests sorted by path.
  */
 function privateDshVersions(root: string): PrivateDshVersion[] {
-  return globSync('packages/*/*/package.json', { cwd: root })
+  return globSync(['apps/*/package.json', 'packages/*/*/package.json'], { cwd: root })
     .map(path => path.replaceAll('\\', '/'))
     .sort()
     .flatMap((manifestPath) => {

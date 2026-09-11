@@ -9,10 +9,11 @@
  */
 
 import { existsSync, globSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import * as yaml from 'js-yaml'
 import { parse as parseToml, type TomlTableWithoutBigInt, type TomlValueWithoutBigInt } from 'smol-toml'
 import parseSpdx from 'spdx-expression-parse'
+import { browserBundledExternals } from './browser-bundled-externals.ts'
 
 const root = resolve(import.meta.dirname, '..')
 const OUT = 'THIRD_PARTY_NOTICES.md'
@@ -24,8 +25,8 @@ const ALL_KINDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'p
 
 /**
  * Workspace areas that never reach a user: repository tooling and gates (the
- * root manifest), test infrastructure, the documentation site, the runnable
- * demo leaves, and the native launcher's build workspace. A runtime
+ * root manifest), test infrastructure, the documentation site, and the native
+ * launcher's build workspace. A runtime
  * declaration by anything outside these areas is a disclosure-relevant
  * runtime dependency because any plugin package can be mounted from a user's
  * `cordis.yml`.
@@ -35,15 +36,16 @@ const DEV_ONLY_AREAS = [
   'packages/test-support/',
   'packages/test-support/client-runtime/',
   'website/',
-  'examples/',
   'native/',
 ] as const
 
 /** First-party public native packages: reachable at runtime but not third-party. */
 const FIRST_PARTY = new Set([
-  '@deepseek-ai/node-addon-landlock-run',
-  '@deepseek-ai/node-addon-landlock-run-linux-arm64',
-  '@deepseek-ai/node-addon-landlock-run-linux-x64',
+  '@deepseek-ai/node-addon-system',
+  '@deepseek-ai/node-addon-system-darwin-arm64',
+  '@deepseek-ai/node-addon-system-darwin-x64',
+  '@deepseek-ai/node-addon-system-linux-arm64',
+  '@deepseek-ai/node-addon-system-linux-x64',
 ])
 
 /** Official SDK identity covered by the project's narrow owner authorization. */
@@ -75,6 +77,7 @@ const OVERRIDES: Record<string, { license?: string; repo?: string }> = {
   '@modelcontextprotocol/server-filesystem': { license: 'MIT / Apache-2.0', repo: 'https://github.com/modelcontextprotocol/servers' },
   // No repository field in the published manifest.
   'node-addon-require-builtin': { repo: 'https://www.npmjs.com/package/node-addon-require-builtin' },
+  // No `license` field in the published manifest; the tarball's LICENSE.txt is the MIT text.
 }
 
 /**
@@ -89,17 +92,6 @@ const PYTHON_METADATA: Record<string, { license: string; repo: string; role: str
 }
 
 type PythonMetadata = typeof PYTHON_METADATA
-
-/** Tools fetched by scripts at build time, keyed by the pin the script owns. */
-const BUILD_TIME_TOOLS = [
-  {
-    name: '@yao-pkg/pkg',
-    license: 'MIT',
-    repo: 'https://github.com/yao-pkg/pkg',
-    role: 'invoked by `scripts/build-exe-for-python-sdk.ts` to assemble the single-file SDK runtime executable',
-    pinSource: 'scripts/build-exe-for-python-sdk.ts',
-  },
-]
 
 /** The `package.json` fields this generator reads. */
 export interface Manifest {
@@ -136,9 +128,6 @@ export function manifestPatterns(rootMembers: readonly string[]): string[] {
   return [
     'package.json',
     ...rootMembers.map(member => `${member}/package.json`),
-    // The demo leaves join the workspace through `examples/package.json`, so
-    // their own manifests are members of nothing and no glob above reaches them.
-    'examples/*/package.json',
   ]
 }
 
@@ -252,47 +241,83 @@ export function claudeDistributionFromManifest(
  *
  * @param virtual - the `.pnpm` virtual store directory to scan.
  * @param name - the external package name, exactly as `node_modules` spells it.
+ * @param expectedVersion - exact version required when the store retains more than one.
  * @returns the parsed manifest, or `undefined` when neither the prefix match
- *   nor the content scan finds the package's `package.json`.
+ *   nor the content scan finds the requested package version.
  */
-export function virtualManifest(virtual: string, name: string): VirtualManifest | undefined {
+export function virtualManifest(
+  virtual: string,
+  name: string,
+  expectedVersion?: string,
+): VirtualManifest | undefined {
   const prefix = `${name.replace('/', '+')}@`
-  const entry = readdirSync(virtual).find(dir => dir.startsWith(prefix))
-  if (entry !== undefined) {
-    return JSON.parse(readFileSync(resolve(virtual, entry, 'node_modules', name, 'package.json'), 'utf8')) as VirtualManifest
+  const entries = readdirSync(virtual)
+  for (const entry of entries.filter(dir => dir.startsWith(prefix))) {
+    const manifest = JSON.parse(readFileSync(resolve(virtual, entry, 'node_modules', name, 'package.json'), 'utf8')) as VirtualManifest
+    if (expectedVersion === undefined || manifest.version === expectedVersion) return manifest
   }
-  for (const dir of readdirSync(virtual)) {
+  for (const dir of entries) {
     const candidate = resolve(virtual, dir, 'node_modules', name, 'package.json')
     if (existsSync(candidate)) {
-      return JSON.parse(readFileSync(candidate, 'utf8')) as VirtualManifest
+      const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as VirtualManifest
+      if (expectedVersion === undefined || manifest.version === expectedVersion) return manifest
     }
   }
   return undefined
 }
 
+const workspaceLinkedManifestCache = new Map<string, VirtualManifest | undefined>()
+
+/**
+ * Resolve the package version selected for a declaring workspace instead of an
+ * unrelated historical version that still occupies the shared virtual store.
+ * @param name - external package identity.
+ * @param manifests - workspace manifests already loaded by the caller, so one
+ *   load serves every dependency instead of a full re-read per name.
+ * @returns the first current workspace link for that package, when installed.
+ */
+function workspaceLinkedManifest(name: string, manifests: Map<string, Manifest>): VirtualManifest | undefined {
+  if (workspaceLinkedManifestCache.has(name)) return workspaceLinkedManifestCache.get(name)
+  for (const [path, manifest] of manifests) {
+    if (!ALL_KINDS.some(kind => name in (manifest[kind] ?? {}))) continue
+    const linked = resolve(root, dirname(path), 'node_modules', name, 'package.json')
+    if (!existsSync(linked)) continue
+    const found = JSON.parse(readFileSync(linked, 'utf8')) as VirtualManifest
+    workspaceLinkedManifestCache.set(name, found)
+    return found
+  }
+  workspaceLinkedManifestCache.set(name, undefined)
+  return undefined
+}
+
 /** Resolve one installed external package manifest from either pnpm store. */
-function installedManifest(name: string): VirtualManifest | undefined {
+function installedManifest(name: string, manifests: Map<string, Manifest>, expectedVersion?: string): VirtualManifest | undefined {
+  const linked = workspaceLinkedManifest(name, manifests)
+  if (linked !== undefined && (expectedVersion === undefined || linked.version === expectedVersion)) return linked
   let manifest: (Manifest & { license?: string; repository?: string | { url?: string }; homepage?: string }) | undefined
   // Workspace-local link farms can expose a dependency that is not linked at
   // the repository root; both are backed by the root workspace's lockfile.
-  for (const store of ['node_modules', 'native/landlock-run/node_modules']) {
+  for (const store of ['node_modules', 'native/system/node_modules']) {
     const direct = resolve(root, store, name, 'package.json')
     if (existsSync(direct)) {
-      manifest = JSON.parse(readFileSync(direct, 'utf8')) as typeof manifest
-      break
+      const candidate = JSON.parse(readFileSync(direct, 'utf8')) as typeof manifest
+      if (expectedVersion === undefined || candidate?.version === expectedVersion) {
+        manifest = candidate
+        break
+      }
     }
     const virtual = resolve(root, store, '.pnpm')
     if (!existsSync(virtual)) continue
-    manifest = virtualManifest(virtual, name)
+    manifest = virtualManifest(virtual, name, expectedVersion)
     if (manifest !== undefined) break
   }
   return manifest
 }
 
 /** License and repository URL for an installed external package, from the pnpm store. */
-function installedMetadata(name: string): { license: string; repo: string } {
+function installedMetadata(name: string, manifests: Map<string, Manifest>): { license: string; repo: string } {
   const override = OVERRIDES[name]
-  const manifest = installedManifest(name)
+  const manifest = installedManifest(name, manifests)
   const license = override?.license ?? manifest?.license
   const rawRepo = typeof manifest?.repository === 'string' ? manifest.repository : manifest?.repository?.url ?? manifest?.homepage
   const repo = override?.repo ?? normalizeRepo(rawRepo)
@@ -302,8 +327,8 @@ function installedMetadata(name: string): { license: string; repo: string } {
   return { license, repo }
 }
 
-function collectClaudeDistribution(): ClaudeDistribution {
-  const manifest = installedManifest(CLAUDE_AGENT_SDK_PACKAGE)
+function collectClaudeDistribution(manifests: Map<string, Manifest>): ClaudeDistribution {
+  const manifest = installedManifest(CLAUDE_AGENT_SDK_PACKAGE, manifests)
   if (manifest === undefined) {
     throw new Error(
       `gen-third-party-notices: cannot resolve ${CLAUDE_AGENT_SDK_PACKAGE}; run \`pnpm install\`.`,
@@ -312,7 +337,7 @@ function collectClaudeDistribution(): ClaudeDistribution {
   const distribution = claudeDistributionFromManifest(manifest)
   let installedPayloads = 0
   for (const payload of distribution.payloads) {
-    const installed = installedManifest(payload.name)
+    const installed = installedManifest(payload.name, manifests, payload.version)
     if (installed === undefined) continue
     installedPayloads += 1
     if (
@@ -347,27 +372,26 @@ function normalizeRepo(raw: string | undefined): string | undefined {
 }
 
 /**
- * External npm dependencies, tiered by which workspace area declares them at
- * runtime: a package is runtime when any manifest outside `DEV_ONLY_AREAS`
- * names it in `dependencies`/`optionalDependencies`. A package declared only
- * by tooling, test infrastructure, the website, or the demo leaves — whatever
- * the declaring section is called — is development-only.
+ * Direct npm dependencies distributed through installed runtime libraries or
+ * browser builds. Tooling declarations alone do not imply distribution.
  */
-function collectNpmDeps(): ExternalDep[] {
-  const { manifests, names } = loadWorkspaceManifests()
-  return [...tierExternalDeps(manifests, names)]
+function collectNpmDeps(manifests: Map<string, Manifest>, names: Set<string>, browser: ReadonlySet<string>): ExternalDep[] {
+  return [...tierExternalDeps(manifests, names, browser)]
     .filter(([name]) => !FIRST_PARTY.has(name))
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, runtime]) => ({ name, ...installedMetadata(name), runtime }))
+    .map(([name, runtime]) => ({ name, ...installedMetadata(name, manifests), runtime }))
 }
 
 /**
  * Tier every external dependency the workspace declares.
  * @param manifests - workspace manifests keyed by repository-relative path.
  * @param names - every workspace package name, which never counts as external.
+ * @param browser - Direct third-party packages resolved by the browser builds.
  * @returns each external package mapped to whether it is a runtime dependency.
  */
-export function tierExternalDeps(manifests: Map<string, Manifest>, names: Set<string>): Map<string, boolean> {
+export function tierExternalDeps(
+  manifests: Map<string, Manifest>, names: Set<string>, browser: ReadonlySet<string> = new Set(),
+): Map<string, boolean> {
   const tiers = new Map<string, boolean>()
   // `tsx` is runtime by fiat: the root source-run scripts execute through its ESM hook.
   tiers.set('tsx', true)
@@ -376,10 +400,13 @@ export function tierExternalDeps(manifests: Map<string, Manifest>, names: Set<st
     for (const kind of ALL_KINDS) {
       for (const [dep, range] of Object.entries(manifest[kind] ?? {})) {
         if (names.has(dep) || range.startsWith('workspace:')) continue
-        const runtime = !devOnly && (RUNTIME_KINDS as readonly string[]).includes(kind)
+        const runtime = browser.has(dep) || !devOnly && (RUNTIME_KINDS as readonly string[]).includes(kind)
         tiers.set(dep, (tiers.get(dep) ?? false) || runtime)
       }
     }
+  }
+  for (const name of browser) {
+    if (!names.has(name) && !tiers.has(name)) throw new Error(`gen-third-party-notices: browser package ${name} has no workspace dependency declaration`)
   }
   return tiers
 }
@@ -571,16 +598,6 @@ function collectPatched(): { spec: string; patch: string }[] {
   return Object.entries(workspace.patchedDependencies ?? {}).map(([spec, patch]) => ({ spec, patch }))
 }
 
-/** Verify each build-time tool pin still appears in its owning script. */
-function verifyBuildTimePins(): void {
-  for (const tool of BUILD_TIME_TOOLS) {
-    const text = readFileSync(resolve(root, tool.pinSource), 'utf8')
-    if (!text.includes(tool.name)) {
-      throw new Error(`gen-third-party-notices: ${tool.pinSource} no longer references ${tool.name}; update BUILD_TIME_TOOLS.`)
-    }
-  }
-}
-
 /** SPDX identifiers this project may ship without further review. */
 const PERMISSIVE_LICENSES = new Set(['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', '0BSD', 'Unlicense', 'CC0-1.0', 'BlueOak-1.0.0', 'Python-2.0'])
 
@@ -613,6 +630,18 @@ export function isPermissive(license: string): boolean {
     return isPermissiveSpdx(parseSpdx(normalized))
   } catch {
     return false
+  }
+}
+
+/**
+ * Reject unapproved non-permissive licenses on installed or browser-bundled code.
+ * @param dependencies - Disclosed runtime package identities and declared licenses.
+ * @throws When a runtime package has no permissive license or exact owner authorization.
+ */
+export function assertRuntimeLicenses(dependencies: readonly { name: string; license: string }[]): void {
+  const rejected = dependencies.filter(dep => !isPermissive(dep.license) && !isOwnerAuthorizedRuntime(dep.name))
+  if (rejected.length > 0) {
+    throw new Error(`gen-third-party-notices: runtime ${rejected.map(dep => `${dep.name} (${dep.license})`).join(', ')} is not a permissive license; review the distribution terms and record the decision before regenerating.`)
   }
 }
 
@@ -658,11 +687,15 @@ ${rows.join('\n')}
 
 /**
  * Render the complete notices document.
- * @returns the exact bytes `THIRD_PARTY_NOTICES.md` must hold.
+ * @returns The exact bytes THIRD_PARTY_NOTICES.md must hold after resolving browser inputs.
  */
-export function render(): string {
-  verifyBuildTimePins()
-  const npm = collectNpmDeps()
+export async function render(): Promise<string> {
+  const browser = await browserBundledExternals(root)
+  // The linked-manifest cache is keyed by name only, so it must not outlive
+  // the manifests map it was resolved from; render() owns that single load.
+  workspaceLinkedManifestCache.clear()
+  const { manifests, names } = loadWorkspaceManifests()
+  const npm = collectNpmDeps(manifests, names, browser)
   const runtimeDeps = npm.filter(dep => dep.runtime)
   const devDeps = npm.filter(dep => !dep.runtime)
   const vendored = collectVendored()
@@ -671,18 +704,10 @@ export function render(): string {
   const claudeDistribution = runtimeDeps.some(
     dep => dep.name === CLAUDE_AGENT_SDK_PACKAGE,
   )
-    ? collectClaudeDistribution()
+    ? collectClaudeDistribution(manifests)
     : undefined
   const nonPermissiveDev = devDeps.filter(dep => !isPermissive(dep.license))
-  // A copyleft license reaching a shipped surface is a distribution decision,
-  // not a rendering detail; the notices cannot quietly absorb it.
-  const nonPermissiveRuntime = runtimeDeps.filter(dep =>
-    !isPermissive(dep.license)
-    && !isOwnerAuthorizedRuntime(dep.name),
-  )
-  if (nonPermissiveRuntime.length > 0) {
-    throw new Error(`gen-third-party-notices: runtime ${nonPermissiveRuntime.map(dep => `${dep.name} (${dep.license})`).join(', ')} is not a permissive license; review the distribution terms and record the decision before regenerating.`)
-  }
+  assertRuntimeLicenses(runtimeDeps)
   const patchedLines = patched.map(({ spec, patch }) => `- \`${spec}\` — [\`${patch}\`](${patch})`)
 
   return `<!-- Generated by scripts/gen-third-party-notices.ts — do not edit by hand.
@@ -706,7 +731,7 @@ ${vendored.map(row => `| \`${row.npmName}\` | \`${row.upstreamName}\` | [${row.u
 
 ## Runtime npm dependencies
 
-External packages that a workspace package resolves at runtime. The tier covers every plugin a user can mount from \`cordis.yml\` — not only what the \`dsh\` CLI, Web UI, and Python SDK runtime load by default.
+External packages installed for runtime use or distributed inside the prebuilt browser artifacts. Browser inputs are resolved through the shipping tsdown and Vite configurations, independently of npm dependency sections. The tier covers every plugin a user can mount from \`cordis.yml\` — not only what the \`dsh\` CLI, Web UI, and Python SDK runtime load by default.
 
 ${renderNpmTable(runtimeDeps)}
 
@@ -717,7 +742,7 @@ ${renderClaudeDistribution(claudeDistribution)}
 
 ## Development-only npm dependencies
 
-External packages **directly declared** only by repository tooling, test infrastructure, the documentation site, the demo leaves, or the native launcher's build workspace. No shipped surface names them itself. A package here may still be pulled in transitively by a runtime dependency — \`pnpm-lock.yaml\` is the authority on the full closure — so this tier records who declares a package, not what a build ultimately bundles.
+External packages **directly declared** for development, tests, types, or tooling, without a runtime installation or browser-build relationship. A package here may still be pulled in transitively by a runtime dependency — \`pnpm-lock.yaml\` is the authority on that full closure.
 
 ${renderNpmTable(devDeps)}
 ${renderNonPermissiveNote(nonPermissiveDev)}
@@ -730,23 +755,17 @@ Direct dependencies of the \`pyproject.toml\` manifests, plus \`uv\` as the deve
 ${python.map(dep => `| [\`${dep.name}\`](${dep.repo}) | ${dep.license} | ${dep.role} |`).join('\n')}
 | [\`uv\`](https://github.com/astral-sh/uv) | MIT / Apache-2.0 | development workflow tool |
 
-## Fetched at build time
-
-| Package | License | Role |
-| --- | --- | --- |
-${BUILD_TIME_TOOLS.map(tool => `| [\`${tool.name}\`](${tool.repo}) | ${tool.license} | ${tool.role} |`).join('\n')}
-
 ## First-party native packages
 
-\`@deepseek-ai/node-addon-landlock-run\` (and its platform packages) is built and released from this repository under BSD 3-Clause. It is listed here for completeness; it is first-party, not third-party.
+\`@deepseek-ai/node-addon-system\` (and its platform packages) is built and released from this repository under BSD 3-Clause. It is listed here for completeness; it is first-party, not third-party.
 `
 }
 
 /** CLI entry: default writes the notices, `--check` fails if the committed copy
  * is stale. Guarded behind an entry-point check so importing this module for
  * tests neither regenerates the committed file nor calls process.exit. */
-function main(): void {
-  const content = render()
+async function main(): Promise<void> {
+  const content = await render()
   if (process.argv.includes('--check')) {
     let committed: string | null = null
     try {
@@ -768,7 +787,6 @@ function main(): void {
   console.log(`gen-third-party-notices: wrote ${OUT}.`)
 }
 
-// Run only when invoked as a script, not when imported by a test.
 if (process.argv[1] !== undefined && import.meta.filename === resolve(process.argv[1])) {
-  main()
+  await main()
 }

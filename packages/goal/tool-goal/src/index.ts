@@ -11,7 +11,6 @@ import type { GoalRef, GoalView } from '@deepseek-ai/dsh-goal'
 import { boundContextSummary, createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-system-prompt'
 import {
   completionAuthority,
   goalToolExecution,
@@ -20,7 +19,7 @@ import {
 import { renderWrapupContext } from './wrapup.ts'
 
 export const name = 'tool-goal'
-export const inject = ['agents', 'goals', 'tools', 'systemPrompt']
+export const inject = ['agents', 'goals', 'tools', 'systemPrompt', 'sessionProjections']
 
 /** Model policy and hard lower bounds for goal-state updates. */
 export interface Config {
@@ -188,7 +187,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
   ctx.systemPrompt.section({
     name: 'tool:goal',
-    order: 114,
+    order: ctx.systemPrompt.getSectionOrder('TOOL_GOAL'),
     text: guidance(resolved.blockedAfterConsecutiveRounds),
   })
 
@@ -275,6 +274,14 @@ export function apply(ctx: Context, config: Config): void {
           throw new HarnessError(
             'objective and max_goal_rounds are valid only with action edit; blocked_reason is valid only with action blocked',
             'GOAL_TOOL_INVALID_UPDATE',
+          )
+        }
+        const current = ctx.goals.get(execution.agent)
+        if (args.action === 'resume' && current?.id === ref.id && current.revision === ref.revision
+          && current.phase === 'paused') {
+          throw new HarnessError(
+            'the model cannot resume a paused goal; the user must resume it',
+            'GOAL_TOOL_RESUME_PAUSED',
           )
         }
         const goal = args.action === 'pause'

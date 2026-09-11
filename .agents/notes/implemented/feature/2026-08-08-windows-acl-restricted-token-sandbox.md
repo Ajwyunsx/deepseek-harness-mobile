@@ -28,7 +28,7 @@ An AppContainer token carries no ambient read access: every readable path must b
 
 ### Why not landstrip?
 
-The [landstrip evaluation](../../rejected/feature/2026-07-26-evaluate-landstrip-for-windows-sandbox-rung.md) was rejected before implementation (not battle-tested; the in-house launcher plan won), and its Windows backend is AppContainer-shaped, inheriting the same arbitrary-read problem.
+The landstrip evaluation was rejected before implementation (not battle-tested; the in-house launcher plan won), and its Windows backend is AppContainer-shaped, inheriting the same arbitrary-read problem.
 
 ## Consequences
 
@@ -40,4 +40,4 @@ The product-visible Windows roster flip is win32-only, so keyless snapshots that
 
 ## Related
 
-The [pwsh executor decision](2026-08-01-pwsh-tool-and-executor.md) owns the pwsh-sandbox/tool-pwsh dialect split this rung consumes.
+The [pwsh executor decision](../../archived/feature/2026-08-01-pwsh-tool-and-executor.md) owns the pwsh-sandbox/tool-pwsh dialect split this rung consumes.

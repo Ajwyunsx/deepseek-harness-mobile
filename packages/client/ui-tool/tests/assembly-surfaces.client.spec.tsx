@@ -1,14 +1,20 @@
+import { toolSessionEvents } from './tool-fixtures.client.ts'
 // @vitest-environment jsdom
 /** Tool assembly acceptance through the real ui-conversation host. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import type { ISession, SessionId, TodoItem, ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ISession } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { TodoItem } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import {
+  apply as applyChat, inject as injectChat, type ToolResultNode,
+} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
-import { SlotTestRuntime, usePinnedBrowserLanguages, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
+import { SlotTestRuntime, TestRemote, usePinnedBrowserLanguages, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { apply as applyConversation, inject as injectConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { apply as applyTool, inject as injectTool } from '../src/client/apply.ts'
-import { toolChatSnapshot } from './tool-details-render.client.tsx'
 
 // The service reads its initial locale from the browser; these specs assert
 // the shipped Chinese copy, so they state the browser they assume.
@@ -41,7 +47,7 @@ const todoResult = (seq: number): ToolResultNode => ({
   kind: 'tool-result', seq, time: seq * 1_000, callId: `todo-${seq}`,
   call: { name: 'todo_write', argsRaw: JSON.stringify({ todos: TODOS }) },
   callTime: seq * 1_000 - 500,
-  content: [], isError: false, callView: null, resultView: null, subCalls: [],
+  content: [], isError: false, subCalls: [],
 })
 
 const bashResult = (seq: number, callId: string, over?: Partial<ToolResultNode>): ToolResultNode => ({
@@ -49,41 +55,44 @@ const bashResult = (seq: number, callId: string, over?: Partial<ToolResultNode>)
   call: { name: 'bash', argsRaw: '{"command":"ls -la","description":"List files"}' },
   callTime: seq * 1_000 - 500,
   content: [{ type: 'text', text: 'total 2\ndemo.txt\n' }], isError: false,
-  callView: { card: 'terminal', title: 'ls -la', description: 'List files' },
-  resultView: { card: 'terminal', output: 'total 2\ndemo.txt\n', exitCode: 0 },
   subCalls: [],
   ...over,
 })
 
 /** Test-owned AppFrame role: declares and renders the resident conversation area. */
-type AppRootProps = PropsRenderSlots<'conversation' | 'details'>
+type AppRootProps = PropsRenderSlots<'main'>
 function AppRoot({ renderSlot }: AppRootProps) {
-  return <>{renderSlot('conversation', {})}</>
+  return <>{renderSlot('main', {}, { entryKey: 'conversation' })}</>
 }
 
 const LAYOUT_CHILDREN = {
-  'conversation': { kind: 'single', scope: 'session-maybe' },
-  'details': { kind: 'single', scope: 'session' },
+  'main': { kind: 'keyed', scope: 'root' },
 } as const
 
 async function bench(nodes: ToolResultNode[]) {
   const runtime = await SlotTestRuntime.create()
-  runtime.provide('connection', {
-    api: { settings: {} },
-    isLoopback: false,
-    hostDescription: { getSnapshot: () => undefined, subscribe: () => () => {} },
+  new TestRemote(runtime.ctx, {
+    session: {
+      openWorkspacePath: vi.fn(async () => ({ ok: true, value: { opened: true } })),
+    },
   })
-  // ui-theme's Appearance row binds a durable scope through these two.
-  runtime.provide('remote', { $on: () => () => {} })
-  runtime.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
-  runtime.provide('layout', { openDetails: vi.fn(), closeDetails: vi.fn() })
+  runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
+  runtime.ctx.provide('layout', { openDetails: vi.fn(), closeDetails: vi.fn() })
+  runtime.ctx.provide('sidebarRight', { openResource: vi.fn() } as never)
+  runtime.ctx.provide('uiWorkspace', {
+    openWorkspace: vi.fn(async (_workspaceId: WorkspaceId, beforeOpen: (id: SessionId) => void) => {
+      beforeOpen(SID)
+      runtime.sessions.open(SID)
+    }),
+    openSession: (id: SessionId) => { runtime.sessions.open(id) },
+  } as never)
   const locale = new LocaleRuntime(runtime.ctx)
-  runtime.provide('locale', locale)
+  runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)
   await runtime.sessions.add({
     id: SID,
     summary: { title: 'S', displayTitle: 'S', cwd: '/proj' },
-    snapshot: { nodes, chat: toolChatSnapshot(nodes) },
+    events: toolSessionEvents(nodes),
     session: {
       loadOlder: vi.fn<ISession['loadOlder']>(),
       prompt: vi.fn<ISession['prompt']>(async () => ({ ok: true, value: { accepted: true } })),
@@ -91,6 +100,7 @@ async function bench(nodes: ToolResultNode[]) {
   })
   await runtime.root.declare(LAYOUT_CHILDREN, AppRoot)
   await runtime.mount({ inject: [...injectConversation], apply: applyConversation })
+  await runtime.mount({ inject: [...injectChat], apply: applyChat })
   await runtime.mount({ inject: [...injectTool], apply: applyTool })
   return runtime
 }
@@ -132,8 +142,10 @@ describe('terminal card assembly', () => {
   it('both the keyed bash row and the fallback row reach the terminal card through the whole-row expand', async () => {
     const runtime = await bench([
       bashResult(3, 'c-keyed'),
-      // An unregistered tool with terminal views: GenericToolCard fallback.
-      bashResult(4, 'c-fallback', { call: { name: 'fx-bash', argsRaw: '{"command":"ls -la"}' } }),
+      // pwsh has no package-local keyed row, so GenericToolCard owns its raw terminal card.
+      bashResult(4, 'c-fallback', {
+        call: { name: 'pwsh', argsRaw: '{"command":"ls -la","description":"List files"}' },
+      }),
     ])
     const view = runtime.renderRoot()
 
@@ -147,7 +159,7 @@ describe('terminal card assembly', () => {
     })
 
     // Fallback row: same unified expand interaction.
-    const fallback = view.container.querySelector('[data-tool="fx-bash"]')
+    const fallback = view.container.querySelector('[data-tool="pwsh"]')
     expect(fallback).not.toBeNull()
     expect(fallback!.querySelector('[data-terminal]')).toBeNull()
     fireEvent.click(fallback!.querySelector('[data-expandable]')!)

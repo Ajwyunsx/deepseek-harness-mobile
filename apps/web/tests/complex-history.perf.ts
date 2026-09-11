@@ -11,13 +11,15 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
-  CallId,
+  ToolCallId,
   createAssistantMessage,
+  createSystemMessage,
   createToolResultMessage,
   createUserMessage,
+  expandAssistantStream,
 } from '@deepseek-ai/dsh-llm'
 import type { ReplayEntry, ReplayOverrideDoc } from '@deepseek-ai/dsh-llm-replay'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import {
   SESSION_FORMAT_VERSION,
   Session,
@@ -187,7 +189,7 @@ function text(value: string): { type: 'text'; text: string }[] {
   return [{ type: 'text', text: value }]
 }
 
-function appendTitle(session: Session, title: string, messageSeq: number): void {
+function appendTitle(session: Session, title: string, messageSeq: SessionSeq): void {
   session.append('session/title', {
     title,
     messageSeqs: [messageSeq],
@@ -195,11 +197,21 @@ function appendTitle(session: Session, title: string, messageSeq: number): void 
   })
 }
 
+function appendSystemPrompt(session: Session, turn: number, step: number): void {
+  session.append('system/message', {
+    turn,
+    step,
+    message: createSystemMessage(
+      'Synthetic performance system prompt.',
+      '@deepseek-ai/dsh-system-prompt',
+    ),
+  }, { surfaceOp: 'append' })
+}
+
 function appendRequestHeader(session: Session, turn: number, step: number): void {
   session.append('request/header', {
     header: {
       config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      system: `Synthetic performance system prompt for turn ${String(turn)}, step ${String(step)}.`,
     },
     reason: turn === 1 && step === 1 ? 'initial' : 'change',
   })
@@ -212,6 +224,7 @@ function appendAssistant(
   body: string,
 ): void {
   session.append('assistant/message', {
+    stream: [],
     turn,
     step,
     message: createAssistantMessage({
@@ -233,7 +246,7 @@ function appendToolStep(
   toolCount: number,
 ): void {
   const calls = Array.from({ length: toolCount }, (_, index) => {
-    const callId = CallId(`perf-call-${String(turn)}-${String(index)}`)
+    const callId = ToolCallId(`perf-call-${String(turn)}-${String(index)}`)
     const args = JSON.stringify({
       turn,
       index,
@@ -243,6 +256,7 @@ function appendToolStep(
   })
 
   session.append('assistant/message', {
+    stream: [],
     turn,
     step,
     message: createAssistantMessage({
@@ -310,10 +324,12 @@ function fixtureLog(session: Session): string {
     id: '{{sessionId}}',
     createdAt: Date.now() - 60_000,
     cwd: '{{cwd}}',
+    isSeeded: false,
+    delegationDepth: 0,
   }
   return [
     JSON.stringify(header),
-    ...session.events.map(event => JSON.stringify(event)),
+    ...session.snapshotEvents().map(event => JSON.stringify(event)),
     '',
   ].join('\n')
 }
@@ -329,6 +345,7 @@ function smallSidebarFixture(): string {
   }), { surfaceOp: 'append' })
   appendTitle(session, 'Synthetic sidebar session', user.seq)
   session.append('step/start', { turn: 1, step: 1 })
+  appendSystemPrompt(session, 1, 1)
   appendRequestHeader(session, 1, 1)
   appendToolStep(session, 1, 1, 2)
   session.append('step/end', { turn: 1, step: 1 })
@@ -355,6 +372,7 @@ function longHistoryFixture(): string {
     if (turn === 1) appendTitle(session, LONG_SESSION_TITLE, user.seq)
 
     session.append('step/start', { turn, step: 1 })
+    if (turn === 1) appendSystemPrompt(session, turn, 1)
     appendRequestHeader(session, turn, 1)
     if (turn % TOOL_TURN_INTERVAL === 0) {
       appendToolStep(session, turn, 1, TOOLS_PER_TOOL_TURN)
@@ -467,7 +485,7 @@ function soakTurn(index: number): ConversationTurnSpec {
 }
 
 function toolStream(index: number, marker: string): StreamChunk[] {
-  const callId = CallId(`performance-tool-${marker.toLowerCase()}-${String(index)}`)
+  const callId = ToolCallId(`performance-tool-${marker.toLowerCase()}-${String(index)}`)
   const args = JSON.stringify({
     command: `printf '${marker}\\n'`,
     description: `Emit performance marker ${String(index)}`,
@@ -907,7 +925,7 @@ async function openPerformancePage(
   world: PerformanceWorld,
   expectedSessions: number,
 ): Promise<Locator> {
-  await world.page.goto(world.scaffold.baseUrl, { waitUntil: 'load' })
+  await world.page.goto(world.scaffold.authenticatedUrl, { waitUntil: 'load' })
   await world.page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
   const group = world.page.getByRole('treeitem').first()
   await expect.poll(() => group.textContent(), { timeout: 30_000 })
@@ -936,7 +954,7 @@ async function continueConversation(
     readonly checkpointInterval?: number
   },
 ): Promise<ConversationReport> {
-  const composer = world.page.locator('textarea:enabled').last()
+  const composer = world.page.locator('[data-composer-input][contenteditable="true"]').last()
   await composer.waitFor({ timeout: 15_000 })
   const retainedBefore = await retainedBrowserState(cdp, world.page)
   const checkpoints: RetainedCheckpoint[] = [{ turns: options.startingTurns, state: retainedBefore }]
@@ -947,8 +965,8 @@ async function continueConversation(
     const spec = options.turnSpec(index)
     const composerFill = await measure(cdp, async () => {
       await composer.fill(spec.prompt)
-      await expect.poll(() => composer.inputValue()).toBe(spec.prompt)
-      return (await composer.inputValue()).length
+      await expect.poll(() => composer.textContent()).toBe(spec.prompt)
+      return ((await composer.textContent()) ?? '').length
     })
     expect(composerFill.value).toBe(spec.prompt.length)
 
@@ -977,7 +995,11 @@ async function continueConversation(
     const streamAfter = await chromiumMetrics(cdp)
     const mutations = await stopMutationProbe(world.page)
     const turnEvents = world.sessionEvents.slice(eventStart)
-    const chunks = turnEvents.filter(event => event.type === 'assistant/chunk')
+    const chunks = turnEvents.flatMap(event => (
+      event.type === 'assistant/message' || event.type === 'assistant/attempt'
+        ? expandAssistantStream(event.data.stream)
+        : []
+    ))
     const toolCalls = turnEvents.filter(event => event.type === 'tool/call')
     const toolResults = turnEvents.filter(event => event.type === 'tool/result')
     const toolTurn = spec.toolResultMarker !== undefined
@@ -1064,11 +1086,11 @@ async function measurePostSoakUserRender(
   if (spec.toolResultMarker !== undefined) {
     throw new Error('post-soak render probe must remain a text-only turn')
   }
-  const composer = world.page.locator('textarea:enabled').last()
+  const composer = world.page.locator('[data-composer-input][contenteditable="true"]').last()
   const composerFill = await measure(cdp, async () => {
     await composer.fill(spec.prompt)
-    await expect.poll(() => composer.inputValue()).toBe(spec.prompt)
-    return (await composer.inputValue()).length
+    await expect.poll(() => composer.textContent()).toBe(spec.prompt)
+    return ((await composer.textContent()) ?? '').length
   })
   expect(composerFill.value).toBe(spec.prompt.length)
 
@@ -1095,7 +1117,11 @@ async function measurePostSoakUserRender(
   const fullTurnMs = performance.now() - fullTurnStarted
 
   const turnEvents = world.sessionEvents.slice(eventStart)
-  const chunks = turnEvents.filter(event => event.type === 'assistant/chunk')
+  const chunks = turnEvents.flatMap(event => (
+    event.type === 'assistant/message' || event.type === 'assistant/attempt'
+      ? expandAssistantStream(event.data.stream)
+      : []
+  ))
   const user = turnEvents.find(
     event => event.type === 'user/message' && event.data.source.kind === 'user',
   )
@@ -1389,7 +1415,7 @@ describe('manual web performance: complex workspace and history', () => {
     })
     let testFailure: unknown
     try {
-      await world.page.goto(world.scaffold.baseUrl, { waitUntil: 'load' })
+      await world.page.goto(world.scaffold.authenticatedUrl, { waitUntil: 'load' })
       await world.page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
       await connectFreshWorkspace(world.page, world.scaffold.workspaceCwd, 'continuous-conversation-perf')
       const cdp = await world.page.context().newCDPSession(world.page)

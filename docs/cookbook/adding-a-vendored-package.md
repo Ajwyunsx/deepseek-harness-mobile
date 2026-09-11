@@ -2,13 +2,13 @@
 
 English | [中文](adding-a-vendored-package.zh.md)
 
-When the harness needs another upstream Cordis package (e.g. `@cordisjs/plugin-http`), it is **vendored** as pinned source under `vendor/`, not added as an npm dependency — see [the vendoring decision](../../.agents/notes/implemented/process/2026-06-11-vendor-cordis-as-source.md) for why. [vendor/README.md](../../vendor/README.md) covers *updating* an already-vendored package; this guide is the file-by-file checklist for adding a **new** one. (Verified against the existing vendored set; if it drifts, fix it here.)
+When the harness needs another upstream Cordis package (e.g. `@cordisjs/plugin-http`), it is **vendored** as pinned source under `vendor/`, not added as an npm dependency. [vendor/README.md](../../vendor/README.md) states why and covers *updating* an already-vendored package; this guide is the file-by-file checklist for adding a **new** one. (Verified against the existing vendored set; if it drifts, fix it here.)
 
 ## 1. Copy the source in
 
 ```
 vendor/<dir>/
-  package.json     # from upstream; set "private": true, rescope the name, keep exports/type
+  package.json     # from upstream; rescope the name, keep exports/type (publishable release member, no private flag)
   tsconfig.json    # extends ../../tsconfig.base.json (see configuration below)
   src/             # the upstream src/ verbatim
   README.md LICENSE # if upstream ships them
@@ -29,7 +29,7 @@ vendor/<dir>/
 }
 ```
 
-`package.json` invariants: `"private": true` (vendored packages are never published), rescope the `name` ([mapping](../rescope.md)) while keeping upstream's `version`/`exports`/`type`, point declaration metadata at `lib/types`, publish `.d.ts` and `.d.ts.map` declaration outputs, and list its cordis deps in `peerDependencies` (matching the upstream manifest). Transitive upstream deps must themselves be vendored or already present — vendoring one package often means vendoring its dependency tree (e.g. `@cordisjs/plugin-http` pulls `@cordisjs/fetch-file`).
+`package.json` invariants: rescope the `name` ([mapping](../rescope.md)) while keeping upstream's `exports`/`type`, point declaration metadata at `lib/types`, publish `.d.ts` and `.d.ts.map` declaration outputs, and list its cordis deps in `peerDependencies` (matching the upstream manifest). Vendored packages are publishable release members, so they must NOT set `private: true` and must set `publishConfig.access: public`; the `version` field follows the harness release sequence (see [vendor/README.md](../../vendor/README.md)). Transitive upstream deps must themselves be vendored or already present — vendoring one package often means vendoring its dependency tree (e.g. `@cordisjs/plugin-http` pulls `@cordisjs/fetch-file`).
 
 Local relative imports/exports in vendored TypeScript source use explicit `.ts` specifiers after copying. This is a repo-local build difference from upstream: `rewriteRelativeImportExtensions` emits `.js` runtime imports while declarations keep explicit `.ts` specifiers that NodeNext/Node16 TypeScript consumers can resolve.
 

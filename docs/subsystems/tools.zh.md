@@ -157,7 +157,7 @@ type InferArgs<S> = InferProperties<S, []>
 ```ts type-equiv
 /**
  * Per-scope filter over global tools. Restrictions intersect and do not affect
- * scoped registrations or the reserved Code Mode transport.
+ * scoped registrations or the reserved PTC mode transport.
  */
 interface ToolRestriction {
   /** Global tool names that stay visible; everything else is removed. */
@@ -183,23 +183,23 @@ type ToolExecutionToken = symbol & { readonly [toolExecutionTokenBrand]: true }
  * callers do not choose that token.
  */
 interface ToolExecutionInput {
-  readonly callId: CallId
+  readonly callId: ToolCallId
   /**
    * Root model-requested call owning this execution tree. Callers omit it for
    * a root execution; nested dispatchers propagate the enclosing value.
    */
-  readonly rootCallId?: CallId
+  readonly rootCallId?: ToolCallId
   readonly name: string
   /** Losslessly JSON-serializable parsed arguments (tools validate their own schema). */
   readonly arguments: unknown
   /** The agent on whose behalf the call runs (set by the agent loop). */
   readonly agent?: Agent
   /**
-   * Opaque token of the enclosing transport execution, when one exists. Code
-   * Mode sets this on SDK sub-dispatches so commit-style observers can wait for
+   * Opaque token of the enclosing transport execution, when one exists. PTC
+   * mode sets this on SDK sub-dispatches so commit-style observers can wait for
    * the outer `run_code` outcome without receiving its live mutable execution.
    * The token also marks the call as a transport sub-dispatch rather than a
-   * model-direct call: under `mode: 'code'`, only calls WITH a parent may
+   * model-direct call: under `mode: 'ptc'`, only calls WITH a parent may
    * execute a native tool name — a model-direct call (no parent) is denied as
    * `UNKNOWN_TOOL` before the policy pipeline. See {@link ToolRuntime.execute}.
    */
@@ -252,25 +252,25 @@ type ToolExecutionMode =
   | { kind: 'exclusive' }
 ```
 
-Code Mode 的桥接层还会把每个已结算的子分派暴露给 `tools/code-dispatch-log` waterfall，该 waterfall 可以更改持久事件所存的内容副本（程序取得的值和模型可见结果均不受影响）：
+PTC mode 的桥接层还会把每个已结算的子分派暴露给 `tools/ptc-dispatch-log` waterfall，该 waterfall 可以更改持久事件所存的内容副本（程序取得的值和模型可见结果均不受影响）：
 
 ```ts type-equiv
 /**
  * One settled `run_code` sub-dispatch about to be logged, as seen by the
- * `tools/code-dispatch-log` waterfall: the parent execution (session owner,
+ * `tools/ptc-dispatch-log` waterfall: the parent execution (session owner,
  * outer call identity), the sub-call identity, and the outcome whose durable
  * copy a listener may reshape. `content` is the RENDERED result projection
  * (what a native `tool/result` would carry) — the program itself received
  * the structured `value` (or just the error message on failure); only the
- * `tool/code-dispatch` event's copy changes.
+ * `tool/ptc-dispatch` event's copy changes.
  */
-interface CodeDispatchLog {
+interface PtcDispatchLog {
   /** The outer `run_code` execution. */
   readonly exec: ToolExecution
   /** The calling agent (the scope routing key and the spill owner), when the outer call has one. */
   readonly agent?: Agent
-  /** Deterministic sub-call id (`<parent>:code:<n>`). */
-  readonly subCallId: CallId
+  /** Opaque sub-call id; new calls use `<parent>:ptc:<n>`. */
+  readonly subCallId: ToolCallId
   /** The dispatched sub-tool name. */
   readonly name: string
   /** Whether the sub-call settled as an error. */
@@ -290,7 +290,7 @@ interface CodeDispatchLog {
  */
 interface ToolExecution extends ToolExecutionInput {
   /** Root model-requested call, resolved for every root and nested execution. */
-  readonly rootCallId: CallId
+  readonly rootCallId: ToolCallId
   /** Registry-assigned identity shared with nested calls only as their opaque `parent` token. */
   readonly token: ToolExecutionToken
 }
@@ -367,7 +367,7 @@ interface ToolExecutionFailure {
 type ToolExecutionResult = ToolExecutionSuccess | ToolExecutionFailure
 ```
 
-结果仅承载产出。调用身份保留在不可变的 `ToolExecution` 上，后者伴随结果经过每个钩子，并出现在持久化的 `tool/call` / `tool/result` 会话事件上，因此包装层无法创建第二个相互矛盾的身份。规范的 `value` 仅存在于执行期间：循环只持久化 `content`、`error` 和 `meta`，`tool/code-dispatch` 则原样存储子调用渲染后的 `content` 与 `isError`。回放可以重现展示，却无法重建规范的中间值。
+结果仅承载产出。调用身份保留在不可变的 `ToolExecution` 上，后者伴随结果经过每个钩子，并出现在持久化的 `tool/call` / `tool/result` 会话事件上，因此包装层无法创建第二个相互矛盾的身份。规范的 `value` 仅存在于执行期间：循环只持久化 `content`、`error` 和 `meta`，`tool/ptc-dispatch` 则原样存储子调用渲染后的 `content` 与 `isError`。回放可以重现展示，却无法重建规范的中间值。
 
 成功时，注册表会快照并校验函数体返回值，将其冻结，然后调用纯渲染器；对于直接的外层调用，还会调用可选的元数据投影器。注册表会在 `tools/result` 之前另行物化持久展示字段；无效值、渲染器/投影器失败或非 JSON 展示都会转为 JSON 安全的 `isError`。因此，最终实时观察者能看到精确的执行期值，以及可安全用于后续持久追加的字段。
 
@@ -488,7 +488,7 @@ Tool registry and execution pipeline. Scoped registrations shadow globals; one v
  * declaration covers every agent joined under it.
  *
  * Scoped only, and one declaration per scope: this is how an agent preset
- * composes Code Mode agents beside native ones in the same process, and a
+ * composes PTC mode agents beside native ones in the same process, and a
  * process-global override would be the `mode` config field instead.
  * @param mode - the presentation the covered agents' models see.
  * @returns the exact disposer that restores the deployment default.
@@ -598,33 +598,6 @@ A tool was registered or unregistered, or a scoped restriction changed (the avai
 
 Source: [`packages/core/tools/src/index.ts`](../../packages/core/tools/src/index.ts)
 
-<a id="toolscode-dispatch-log--waterfall"></a>
-
-#### `tools/code-dispatch-log` — waterfall
-
-Allow a listener to replace content in the DURABLE LOG COPY of one `run_code` sub-dispatch outcome before the bridge appends its `tool/code-dispatch` event. `next()` keeps the content unchanged; a listener may return replacement blocks (e.g. the spill policy's preview + locator for an oversized text result). Only the logged copy is affected — the program already received the complete value, and the model sees neither. A throwing listener is contained: the bridge falls back to logging the original settled content. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent's dispatches.
-
-```ts cordis-catalog
-/**
- * Allow a listener to replace content in the DURABLE LOG COPY of one
- * `run_code` sub-dispatch outcome before the bridge appends its
- * `tool/code-dispatch` event. `next()` keeps the
- * content unchanged; a listener may return replacement blocks (e.g. the
- * spill policy's preview + locator for an oversized text result). Only the
- * logged copy is affected — the program already received the complete
- * value, and the model sees neither. A throwing listener is contained:
- * the bridge falls back to logging the original settled content.
- * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent's dispatches.
- * @param dispatch - the parent execution, sub-call identity, and the settled content to log.
- * @mode waterfall
- */
-'tools/code-dispatch-log'(this: Scoped<ToolRuntime>, dispatch: CodeDispatchLog, next: () => Promise<ContentBlock[]>): Promise<ContentBlock[]>
-```
-
-Types: [ContentBlock](llm-streaming.zh.md) · [Scoped](scope.zh.md)
-
-Source: [`packages/core/tools/src/index.ts`](../../packages/core/tools/src/index.ts)
-
 <a id="toolsexecute--waterfall"></a>
 
 #### `tools/execute` — waterfall
@@ -694,6 +667,33 @@ Allow, deny, or ask before dispatch. `next()` delegates to allow; missing approv
 ```
 
 Types: [Scoped](scope.zh.md)
+
+Source: [`packages/core/tools/src/index.ts`](../../packages/core/tools/src/index.ts)
+
+<a id="toolsptc-dispatch-log--waterfall"></a>
+
+#### `tools/ptc-dispatch-log` — waterfall
+
+Allow a listener to replace content in the DURABLE LOG COPY of one `run_code` sub-dispatch outcome before the bridge appends its `tool/ptc-dispatch` event. `next()` keeps the content unchanged; a listener may return replacement blocks (e.g. the spill policy's preview + locator for an oversized text result). Only the logged copy is affected — the program already received the complete value, and the model sees neither. A throwing listener is contained: the bridge falls back to logging the original settled content. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent's dispatches.
+
+```ts cordis-catalog
+/**
+ * Allow a listener to replace content in the DURABLE LOG COPY of one
+ * `run_code` sub-dispatch outcome before the bridge appends its
+ * `tool/ptc-dispatch` event. `next()` keeps the
+ * content unchanged; a listener may return replacement blocks (e.g. the
+ * spill policy's preview + locator for an oversized text result). Only the
+ * logged copy is affected — the program already received the complete
+ * value, and the model sees neither. A throwing listener is contained:
+ * the bridge falls back to logging the original settled content.
+ * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent's dispatches.
+ * @param dispatch - the parent execution, sub-call identity, and the settled content to log.
+ * @mode waterfall
+ */
+'tools/ptc-dispatch-log'(this: Scoped<ToolRuntime>, dispatch: PtcDispatchLog, next: () => Promise<ContentBlock[]>): Promise<ContentBlock[]>
+```
+
+Types: [ContentBlock](llm-streaming.zh.md) · [Scoped](scope.zh.md)
 
 Source: [`packages/core/tools/src/index.ts`](../../packages/core/tools/src/index.ts)
 

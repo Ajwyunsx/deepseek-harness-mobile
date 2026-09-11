@@ -1,6 +1,6 @@
 /**
  * Keyless snapshot-test LLM replay. It derives one model-call script per
- * recorded session from `assistant/chunk` events and explicitly marked local
+ * recorded session from v3 embedded Assistant streams and explicitly marked local
  * compaction calls, then binds fresh live sessions to parent/child scripts by
  * first-call order. Throw and hang cases require an explicit override because
  * a session log cannot reconstruct them alone.
@@ -11,10 +11,17 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { delimiter as pathDelimiter } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-compaction'
-import { decodeStorageRecord, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
+import { SESSION_FORMAT_VERSION, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
+import {
+  SessionFormatUnsupportedMigrationError,
+  sessionFormatCatalog,
+} from '@deepseek-ai/dsh-session-format-catalog'
 import type {
   ContentBlock,
   GenerateOptions,
+  LlmImageRequestPricing,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
@@ -22,11 +29,29 @@ import type {
   ResolvedRetryPolicy,
   RetryPolicyConfig,
   StreamChunk,
+  SystemPromptUpdate,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import { LlmAdapter, LlmError, ReasoningEffortId, assertNever, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ReasoningEffortId, expandAssistantStream, requestImageHandleText, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { assertNever } from '@deepseek-ai/dsh-util-values'
 
 const PACKED_CHUNK_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks'])
+
+if (sessionFormatCatalog.currentVersion !== SESSION_FORMAT_VERSION) {
+  throw new Error(
+    `llm-replay: format catalog v${sessionFormatCatalog.currentVersion} `
+    + `does not match Session v${SESSION_FORMAT_VERSION}`,
+  )
+}
+
+interface ParsedSessionFixture {
+  readonly id: string
+  readonly createdAt: number
+  readonly inheritedEventCount: SessionLogOffsetType
+  readonly events: SessionEvent[]
+  readonly artifact: ReturnType<ReturnType<typeof sessionFormatCatalog.createRestore>['finish']>
+  readonly sourceHeader: Readonly<Record<string, unknown>>
+}
 
 /**
  * One recorded model call. `throw` may replay prefix chunks before failing;
@@ -36,7 +61,7 @@ const PACKED_CHUNK_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool
  */
 export type ReplayEntry =
   | { kind: 'chunks'; chunks: StreamChunk[] }
-  | { kind: 'throw'; chunks: StreamChunk[]; message: string; code: string }
+  | { kind: 'throw'; chunks: StreamChunk[]; message: string; code: string; accepted?: boolean }
   | {
     kind: 'hang'
     /** Optional marker written after the prefix chunks are consumed and before the stream waits for cancellation. */
@@ -60,6 +85,15 @@ export interface ReplayModelConfig {
    * omit one, so replay reconstructs the request header a live catalog produced.
    */
   defaultMaxTokens?: number
+  /**
+   * Optional flat visual-token price the replay route declares for every
+   * retained request image, so keyless scenarios exercise route-priced
+   * request pressure; each occurrence is priced at this value plus its
+   * request-preview handle text. Requires {@link inputModalities} to include
+   * `image` — a text-only route never sends visual tokens. Absent declares
+   * no image pricing.
+   */
+  imageRequestTokens?: number
   /** Optional reasoning-effort ids the replay route accepts, in display order. */
   reasoningEfforts?: string[]
   /**
@@ -67,6 +101,8 @@ export interface ReplayModelConfig {
    * {@link reasoningEfforts} or call resolution rejects the route.
    */
   defaultReasoningEffort?: string
+  /** Optional in-history system prompt replacement for a keyless replay route. */
+  systemPromptUpdate?: SystemPromptUpdate
 }
 
 /** One provider route exposed by the replay adapter. */
@@ -84,16 +120,17 @@ export interface ReplayProviderConfig {
 /** Resolved plugin configuration. */
 export interface ReplayConfig {
   /**
-   * Path to the PRIMARY (parent) `session.jsonl` fixture. For a single-session
-   * scenario this is the only log; for a nested-agent scenario it is the parent,
-   * and the child logs ride in {@link childFiles}.
+   * Path to the selected PRIMARY fixture (`session.jsonl` for v0 or
+   * `session.vN.jsonl` for vN). For a single-session scenario this is the only
+   * log; for a nested-agent scenario it is the parent, and child logs ride in
+   * {@link childFiles}.
    */
   file: string
   /**
    * Optional sidecar for the PRIMARY session: a bare `ReplayEntry[]` replaces
    * the derived script; `{ patches }` keeps it and swaps the named call
    * indexes ({@link ReplayOverrideDoc}). Used by single-session scenarios not
-   * expressible as `assistant/chunk` (throw-before-chunk, cancel/hang,
+   * expressible as a durable embedded stream (throw-before-chunk, cancel/hang,
    * injected transient failures). Absent for normal and nested scenarios.
    */
   overrideFile?: string
@@ -115,7 +152,7 @@ export interface ReplayConfig {
    * this long before yielding, so a downstream transport (e.g. the web SSE
    * mux observed by a browser) sees genuinely incremental delivery. A realism
    * knob only — correctness must never depend on it. Absent or `0` keeps
-   * today's synchronous burst yield. Must be a non-negative finite integer;
+   * a synchronous burst yield. Must be a non-negative finite integer;
    * aborting mid-wait cancels the stream like any other abort.
    */
   paceMs?: number
@@ -157,27 +194,29 @@ export interface SessionScript {
 }
 
 /**
- * Parse a session `.jsonl` buffer into its event list. Line 0 is the session
- * header (a `{type:'session',…}` record), every subsequent non-empty line is a
- * {@link SessionEvent} or a packed chunk row (expanded back into its events, so
- * a fixture recorded with `packChunks` on derives the same script). The header
- * is skipped; malformed lines fail loud.
+ * Parse a projected session `.jsonl` buffer into current events. The first
+ * non-empty line is the physical header. Body rows either all carry complete
+ * persistence envelopes or all omit them; projected rows receive deterministic
+ * dense sequences and zero timestamps. The build-static format catalog then
+ * decodes and migrates the complete artifact before this function returns.
  * @param text - the raw `.jsonl` file contents.
- * @returns every event after the header, in log order.
+ * @returns every migrated current event, in log order.
  */
 export function parseSessionLog(text: string): SessionEvent[] {
-  const events: SessionEvent[] = []
+  return parseSessionFixture(text).events
+}
+
+/** Parse, complete, decode, and migrate one projected snapshot artifact without writing its source. */
+function parseSessionFixture(text: string): ParsedSessionFixture {
+  let headerLineNumber: number | undefined
+  let sourceHeader: Record<string, unknown> | undefined
+  let restore: ReturnType<typeof sessionFormatCatalog.createRestore> | undefined
+  const rowLines: number[] = []
+  const eventLines: number[] = []
+  let bodyKind: 'complete' | 'projected' | undefined
   let nextSeq = 0
-  let headerSkipped = false
-  // The JSONL backend guarantees line 0 is the session header. Projected
-  // fixtures omit event envelopes; synthesize them while decoding so callers
-  // still receive complete SessionEvent values.
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     if (line.trim().length === 0) continue
-    if (!headerSkipped) {
-      headerSkipped = true
-      continue
-    }
     let value: unknown
     try {
       value = JSON.parse(line) as unknown
@@ -187,47 +226,227 @@ export function parseSessionLog(text: string): SessionEvent[] {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(`session snapshot line ${index + 1} must be a JSON object`)
     }
-    const record = value as Record<string, unknown>
+    const lineNumber = index + 1
+    const recordValue = value as Record<string, unknown>
+    if (restore === undefined) {
+      headerLineNumber = lineNumber
+      sourceHeader = recordValue
+      try {
+        restore = sessionFormatCatalog.createRestore(normalizeProjectedHeader(recordValue), {
+          recovery: 'strict',
+          validation: 'current',
+        })
+      } catch (error: unknown) {
+        throw fixtureFormatError(error, lineNumber, [], [])
+      }
+      continue
+    }
+    const record = normalizeProjectedRow(recordValue)
     const packed = PACKED_CHUNK_ROW_TYPES.has(record.type as string)
     const seqKey = packed ? 'seq0' : 'seq'
     const timeKey = packed ? 'time0' : 'time'
-    if (!Object.hasOwn(record, seqKey)) record[seqKey] = nextSeq
-    if (!Object.hasOwn(record, timeKey)) record[timeKey] = 0
-    let decoded: SessionEvent[]
-    try {
-      decoded = decodeStorageRecord(record)
-    } catch (error) {
-      /* v8 ignore next -- decodeStorageRecord only throws Error instances; the String arm satisfies unknown narrowing. */
-      const detail = error instanceof Error ? error.message : String(error)
-      throw new Error(`session snapshot line ${index + 1}: ${detail}`, { cause: error })
+    const hasSeq = Object.hasOwn(record, seqKey)
+    const hasTime = Object.hasOwn(record, timeKey)
+    if (hasSeq !== hasTime) {
+      throw new Error(
+        `session snapshot line ${lineNumber} must contain both ${seqKey} and ${timeKey}, or neither`,
+      )
     }
-    events.push(...decoded)
-    nextSeq += decoded.length
+    const currentKind = hasSeq ? 'complete' : 'projected'
+    if (bodyKind !== undefined && currentKind !== bodyKind) {
+      throw new Error(`session snapshot line ${lineNumber} cannot mix projected and complete body rows`)
+    }
+    bodyKind = currentKind
+    if (currentKind === 'projected') {
+      record[seqKey] = nextSeq
+      record[timeKey] = 0
+    }
+    const cardinality = physicalRowCardinality(record)
+    rowLines.push(lineNumber)
+    eventLines.push(...Array.from({ length: cardinality }, () => lineNumber))
+    nextSeq += cardinality
+    try {
+      restore.decodeRow(record)
+    } catch (error: unknown) {
+      throw fixtureFormatError(error, headerLineNumber as number, rowLines, eventLines, rowLines.length - 1)
+    }
   }
-  return events
+  if (restore === undefined || sourceHeader === undefined || headerLineNumber === undefined) {
+    throw new Error('session snapshot must start with a session header')
+  }
+  try {
+    return parsedSessionFixture(restore.finish(), sourceHeader)
+  } catch (error: unknown) {
+    throw fixtureFormatError(error, headerLineNumber, rowLines, eventLines)
+  }
+}
+
+/** Materialize the common replay view from a migrated artifact. */
+function parsedSessionFixture(
+  artifact: ParsedSessionFixture['artifact'],
+  sourceHeader: Readonly<Record<string, unknown>>,
+): ParsedSessionFixture {
+  return {
+    id: artifact.header.id,
+    createdAt: artifact.header.createdAt,
+    inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),
+    events: [...artifact.events] as unknown as SessionEvent[],
+    artifact,
+    sourceHeader,
+  }
+}
+
+/**
+ * Convert one persisted or projected snapshot fixture to the current physical format in memory for expected-output comparison.
+ * Projected cwd and request-tool tokens remain tokens for comparison with a fresh run.
+ * @param text - one complete Session fixture.
+ * @returns current-format JSONL with complete event envelopes; the input string and source file remain unchanged.
+ */
+export function prepareSessionSnapshotFixtureForComparison(text: string): string {
+  const parsed = parseSessionFixture(text)
+  return encodeCurrentSessionSnapshotFixture(text, parsed)
+}
+
+/** Restore fixture tokens materialized only to satisfy released-format validation. */
+function restoreProjectedRequestHeader(
+  target: Readonly<Record<string, unknown>>,
+  source: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const targetData = target['data'] as Record<string, unknown>
+  const sourceData = source['data'] as Record<string, unknown>
+  const targetHeader = targetData['header'] as Record<string, unknown>
+  const sourceHeader = sourceData['header'] as Record<string, unknown>
+  const sourceTools = sourceHeader['tools']
+  if (sourceTools !== '{{tools}}') return target
+  return {
+    ...target,
+    data: {
+      ...targetData,
+      header: { ...targetHeader, tools: sourceTools },
+    },
+  }
+}
+
+/** Encode one migrated fixture while retaining projected cwd and request-tool tokens. */
+function encodeCurrentSessionSnapshotFixture(text: string, parsed: ParsedSessionFixture): string {
+  const header = {
+    ...sessionFormatCatalog.encodeCurrentHeader(
+      parsed.artifact.header,
+      parsed.artifact.inheritedEventCount,
+    ),
+  }
+  const sourceCwd = parsed.sourceHeader['cwd']
+  if (typeof sourceCwd === 'string' && /^\{\{cwd\}\}(?:\/|$)/.test(sourceCwd)) header['cwd'] = sourceCwd
+  const sourceRequests = text.split(/\r?\n/).filter(line => line.trim().length > 0).slice(1)
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(row => row['type'] === 'request/header')
+  let requestIndex = 0
+  const output = [
+    JSON.stringify(header),
+    ...parsed.artifact.events.map((event) => {
+      const encoded = sessionFormatCatalog.encodeCurrentEvent(event)
+      if (event.type !== 'request/header') return JSON.stringify(encoded)
+      const source = sourceRequests[requestIndex++] as Record<string, unknown>
+      return JSON.stringify(restoreProjectedRequestHeader(encoded, source))
+    }),
+  ].join('\n')
+  return text.endsWith('\n') ? `${output}\n` : output
+}
+
+/** Omit exact request-tool sidecar tokens and materialize projected tool names for validation. */
+function normalizeProjectedRow(source: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const record = { ...source }
+  if (record['type'] !== 'request/header') return record
+  const data = record['data']
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return record
+  const header = (data as Record<string, unknown>)['header']
+  if (header === null || typeof header !== 'object' || Array.isArray(header)) return record
+  const tools = (header as Record<string, unknown>)['tools']
+  const normalizedHeader = { ...header as Record<string, unknown> }
+  if (tools === '{{tools}}') {
+    delete normalizedHeader['tools']
+  } else if (Array.isArray(tools) && tools.length > 0
+    && tools.every((tool): tool is string => typeof tool === 'string' && tool.length > 0)) {
+    normalizedHeader['tools'] = tools.map(name => ({ name, description: '', parameters: {} }))
+  } else {
+    return record
+  }
+  record['data'] = { ...data, header: normalizedHeader }
+  return record
+}
+
+/** Materialize fixture-only header omissions and tokens before physical validation. */
+function normalizeProjectedHeader(header: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const normalized = { ...header }
+  if (normalized['version'] === 0 && !Object.hasOwn(header, 'delegationDepth')) {
+    normalized['delegationDepth'] = 0
+  }
+  if (typeof header['cwd'] === 'string' && /^\{\{cwd\}\}(?:\/|$)/.test(header['cwd'])) {
+    normalized['cwd'] = header['cwd'].replace('{{cwd}}', '/dsh-snapshot-cwd')
+  }
+  return normalized
+}
+
+/** Return how many logical events one physical row contributes for deterministic seq completion. */
+function physicalRowCardinality(row: Readonly<Record<string, unknown>>): number {
+  if (!PACKED_CHUNK_ROW_TYPES.has(row['type'] as string)) return 1
+  const data = row['data']
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return 1
+  const payload = (data as Record<string, unknown>)[row['type'] === 'tool-call-chunks' ? 'args' : 'texts']
+  return Array.isArray(payload) && payload.length > 0 ? payload.length : 1
+}
+
+/** Attach the nearest physical source line while preserving unsupported-migration classification. */
+function fixtureFormatError(
+  error: unknown,
+  headerLine: number,
+  rowLines: readonly number[],
+  eventLines: readonly number[],
+  physicalRow?: number,
+): Error {
+  const detail = error instanceof Error ? error.message : String(error)
+  const locationDetail = error instanceof Error && error.cause instanceof Error
+    ? error.cause.message
+    : detail
+  const storedRow = /^released Session row (\d+)/.exec(locationDetail)
+  const event = /Session event (\d+)/.exec(locationDetail)
+    ?? / at seq (\d+)/.exec(locationDetail)
+    ?? /inherited Session cut (\d+)/.exec(locationDetail)
+  let line: number
+  if (physicalRow !== undefined) line = rowLines[physicalRow] as number
+  else if (storedRow !== null) line = rowLines[Number(storedRow[1])] ?? headerLine
+  else if (event === null) line = headerLine
+  else line = eventLines[Number(event[1])] ?? headerLine
+  const message = `session snapshot line ${line}: ${detail}`
+  if (error instanceof SessionFormatUnsupportedMigrationError) {
+    return new SessionFormatUnsupportedMigrationError(message, { cause: error })
+  }
+  return new Error(message, { cause: error })
 }
 
 /**
  * Read replay identity, ordering, and fork-seed facts from the JSONL header.
  *
- * @param text - the raw `.jsonl` file contents (only the header line is read).
- * @returns the header's `id`, `createdAt`, and `seedLength`, defaulted when absent.
+ * @param text - the raw `.jsonl` file contents; the complete artifact is validated and migrated.
+ * @returns the migrated header's `id`, `createdAt`, and exact inherited-event count.
  */
-export function parseSessionHeader(text: string): { id: string; createdAt: number; seedLength: number } {
-  const firstLine = text.split('\n').find(line => line.trim().length > 0) ?? '{}'
-  const parsed = JSON.parse(firstLine) as { id?: unknown; createdAt?: unknown; seedLength?: unknown }
+export function parseSessionHeader(text: string): {
+  id: string
+  createdAt: number
+  inheritedEventCount: SessionLogOffsetType
+} {
+  const parsed = parseSessionFixture(text)
   return {
-    id: typeof parsed.id === 'string' ? parsed.id : '',
-    createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : 0,
-    seedLength: typeof parsed.seedLength === 'number' ? parsed.seedLength : 0,
+    id: parsed.id,
+    createdAt: parsed.createdAt,
+    inheritedEventCount: parsed.inheritedEventCount,
   }
 }
 
 /**
  * Reconstruct the per-`stream()` replay script from a recorded session log.
  *
- * Splits `assistant/chunk` events at every `finish`, using turn and step changes
- * to detect an unterminated prior call. A `compaction/summary` explicitly marked
+ * Reads one embedded stream from each Assistant settlement. A `compaction/summary` explicitly marked
  * as one local LLM-stream call becomes a canonical successful stream from its
  * complete `rawOutput` at the summary's log position. A
  * missing assistant terminator means the live stream threw, so derivation
@@ -238,8 +457,6 @@ export function parseSessionHeader(text: string): { id: string; createdAt: numbe
  */
 export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
   const script: ReplayEntry[] = []
-  let currentKey: string | undefined
-  let current: StreamChunk[] = []
   const close = (key: string | undefined, chunks: StreamChunk[]): void => {
     if (chunks.length === 0) return
     if (chunks[chunks.length - 1]?.type !== 'finish') {
@@ -252,9 +469,6 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
   }
   for (const event of events) {
     if (event.type === 'compaction/summary') {
-      close(currentKey, current)
-      currentKey = undefined
-      current = []
       // JSONL decoding crosses an untyped durable boundary, so retain its wider
       // shape even though current in-process producers enforce this correlation.
       const persisted: {
@@ -277,21 +491,10 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
       }
       continue
     }
-    if (event.type !== 'assistant/chunk') continue
-    const { turn, step, chunk } = event.data
-    const key = `${turn}/${step}`
-    if (current.length > 0 && key !== currentKey) {
-      close(currentKey, current)
-    }
-    if (current.length === 0) currentKey = key
-    current.push(chunk)
-    if (chunk.type === 'finish') {
-      close(currentKey, current)
-      currentKey = undefined
-      current = []
-    }
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
+    const chunks = expandAssistantStream(event.data.stream).map(member => member.chunk)
+    close(`${String(event.data.turn)}/${String(event.data.step)}`, chunks)
   }
-  close(currentKey, current)
   return script
 }
 
@@ -416,6 +619,47 @@ export function resolveScriptedEntry(entry: ReplayEntry, messages: GenerateOptio
   return substituteValue(entry, leaves.join('\n')) as ReplayEntry
 }
 
+/** Replace typed recorded-session tokens with the live sessions bound at the same corpus indexes. */
+function materializeSessionTokens(entry: ReplayEntry, liveSessionIds: readonly (string | undefined)[]): ReplayEntry {
+  if (!JSON.stringify(entry).includes('{{session:')) return entry
+  const replace = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      return value.replace(/\{\{session:([1-9]\d*)\}\}/g, (_token, ordinal: string) => {
+        const live = liveSessionIds[Number(ordinal) - 1]
+        if (live === undefined) {
+          throw new Error(`llm-replay: session token {{session:${ordinal}}} was used before that recorded session bound`)
+        }
+        return live
+      })
+    }
+    if (Array.isArray(value)) return value.map(replace)
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replace(item)]))
+    }
+    return value
+  }
+  return replace(entry) as ReplayEntry
+}
+
+/** Learn a background child id from the stable tool-result text before that child reaches its first model call. */
+function inferStartedSubagents(
+  messages: GenerateOptions['messages'],
+  liveSessionIds: (string | undefined)[],
+): void {
+  const leaves: string[] = []
+  collectStrings(messages, leaves)
+  for (const leaf of leaves) {
+    for (const match of leaf.matchAll(/started subagent ([^\s"'<>]+)/g)) {
+      const id = match[1]
+      /* v8 ignore next -- the fixed regular expression always has capture group 1. */
+      if (id === undefined || liveSessionIds.includes(id)) continue
+      const index = liveSessionIds.findIndex((value, candidate) => candidate > 0 && value === undefined)
+      if (index < 0) return
+      liveSessionIds[index] = id
+    }
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -448,7 +692,11 @@ function readReplayEntry(value: unknown, file: string, location: string): Replay
       return { kind: 'chunks', chunks: readChunks(value['chunks'], file, location) }
     }
     case 'throw': {
-      if (!hasExactKeys(value, ['kind', 'chunks', 'message', 'code'])) {
+      const accepted = value['accepted']
+      const keys = accepted === undefined
+        ? ['kind', 'chunks', 'message', 'code']
+        : ['kind', 'chunks', 'message', 'code', 'accepted']
+      if (!hasExactKeys(value, keys)) {
         invalidOverride(file, location, 'has invalid throw-entry fields')
       }
       if (typeof value['message'] !== 'string' || value['message'].length === 0) {
@@ -457,11 +705,15 @@ function readReplayEntry(value: unknown, file: string, location: string): Replay
       if (typeof value['code'] !== 'string' || value['code'].length === 0) {
         invalidOverride(file, location, 'code must be a non-empty string')
       }
+      if (accepted !== undefined && typeof accepted !== 'boolean') {
+        invalidOverride(file, location, 'accepted must be a boolean')
+      }
       return {
         kind: 'throw',
         chunks: readChunks(value['chunks'], file, location),
         message: value['message'],
         code: value['code'],
+        ...(accepted === undefined ? {} : { accepted }),
       }
     }
     case 'hang': {
@@ -507,10 +759,25 @@ function readOverrideDoc(value: unknown, file: string): ReplayOverrideDoc {
  * @returns the resolved primary-session script.
  */
 export function loadReplayScript(config: ReplayConfig): ReplayEntry[] {
+  const fixture = readPrimaryFixture(config)
+  return resolveReplayScript(config, fixture)
+}
+
+/** Read a primary JSONL unless a whole-script sidecar intentionally occupies the same path. */
+function readPrimaryFixture(config: ReplayConfig): ParsedSessionFixture | undefined {
+  if (!existsSync(config.file) || config.file === config.overrideFile) return undefined
+  return parseSessionFixture(readFileSync(config.file, 'utf8'))
+}
+
+/** Resolve an override or derive from one already validated and migrated fixture. */
+function resolveReplayScript(
+  config: ReplayConfig,
+  fixture: ParsedSessionFixture | undefined,
+): ReplayEntry[] {
   if (config.overrideFile !== undefined && existsSync(config.overrideFile)) {
     const doc = readOverrideDoc(JSON.parse(readFileSync(config.overrideFile, 'utf8')) as unknown, config.overrideFile)
     if (Array.isArray(doc)) return doc
-    const script = deriveScriptFromFile(config.file)
+    const script = deriveScriptFromFixture(config.file, fixture)
     const derivedLength = script.length
     const seenIndexes = new Set<number>()
     for (const patch of doc.patches) {
@@ -528,32 +795,31 @@ export function loadReplayScript(config: ReplayConfig): ReplayEntry[] {
     }
     return script
   }
-  return deriveScriptFromFile(config.file)
+  return deriveScriptFromFixture(config.file, fixture)
 }
 
-/** Derive the primary script from the session JSONL, failing loud on a missing fixture. */
-function deriveScriptFromFile(file: string): ReplayEntry[] {
-  if (!existsSync(file)) {
+/** Derive a script from an already migrated fixture, failing loud when it is absent. */
+function deriveScriptFromFixture(file: string, fixture: ParsedSessionFixture | undefined): ReplayEntry[] {
+  if (fixture === undefined) {
     throw new Error(`llm-replay: fixture not found: ${file} — run \`pnpm run test:snapshot:record\` first`)
   }
-  return deriveReplayScript(parseSessionLog(readFileSync(file, 'utf8')))
+  return deriveReplayScript(fixture.events)
 }
 
 /**
  * Load the primary and child scripts in bind order. Child derivation begins at
- * `seedLength` so inherited parent chunks are never replayed as child calls.
+ * the v0 header's inherited-event cut so parent chunks are never replayed as child calls.
  *
  * @param config - the fixture paths: the primary log plus any recorded child logs.
  * @returns the primary script first, then the child scripts in bind order.
  */
 export function loadSessionScripts(config: ReplayConfig): SessionScript[] {
-  const primaryEntries = loadReplayScript(config)
+  const primaryFixture = readPrimaryFixture(config)
+  const primaryEntries = resolveReplayScript(config, primaryFixture)
   // The override path replaces the derived script but carries no header; read
   // the header off the JSONL when it exists, else use a stable default so an
   // override-only fixture (header-less) still orders first as the primary.
-  const primaryHeader = existsSync(config.file)
-    ? parseSessionHeader(readFileSync(config.file, 'utf8'))
-    : { id: '', createdAt: 0 }
+  const primaryHeader = primaryFixture ?? { id: '', createdAt: 0 }
   const primary: SessionScript = {
     recordedId: primaryHeader.id, createdAt: primaryHeader.createdAt, entries: primaryEntries, primary: true,
   }
@@ -563,13 +829,13 @@ export function loadSessionScripts(config: ReplayConfig): SessionScript[] {
       throw new Error(`llm-replay: child fixture not found: ${childFile} — re-record the scenario`)
     }
     const text = readFileSync(childFile, 'utf8')
-    const header = parseSessionHeader(text)
+    const fixture = parseSessionFixture(text)
     // Derive the child's script from its own events only — events AT OR after the seed
     // boundary.
-    const ownEvents = parseSessionLog(text).slice(header.seedLength)
+    const ownEvents = fixture.events.slice(fixture.inheritedEventCount)
     children.push({
-      recordedId: header.id,
-      createdAt: header.createdAt,
+      recordedId: fixture.id,
+      createdAt: fixture.createdAt,
       entries: deriveReplayScript(ownEvents),
       primary: false,
     })
@@ -608,6 +874,18 @@ class ReplayAdapter extends LlmAdapter {
       : resolveRetryPolicy(configured.retryPolicy, `llm-replay: provider "${provider}" retryPolicy`)
   }
 
+  override imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined {
+    const configured = this.providers.get(provider)
+    const visualTokens = configured?.models?.find(candidate => candidate.id === model)?.imageRequestTokens
+    if (visualTokens === undefined) return undefined
+    return {
+      priceImages: images => images.map(ref => ({
+        visualTokens,
+        text: requestImageHandleText(ref, { width: ref.width, height: ref.height }),
+      })),
+    }
+  }
+
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const configured = this.providers.get(provider)
     /* v8 ignore next -- LlmRuntime only asks about routes registered from this same map. */
@@ -640,6 +918,9 @@ class ReplayAdapter extends LlmAdapter {
       ...configuredModel?.defaultMaxTokens === undefined
         ? {}
         : { defaultMaxTokens: configuredModel.defaultMaxTokens },
+      ...configuredModel?.systemPromptUpdate === undefined
+        ? {}
+        : { systemPromptUpdate: configuredModel.systemPromptUpdate },
       ...configuredModel?.reasoningEfforts === undefined
         ? {}
         : {
@@ -716,6 +997,20 @@ async function* replayEntry(entry: ReplayEntry, signal: AbortSignal | undefined,
   }
 }
 
+/** Whether the scripted provider call reached the live adapter's post-2xx commit point. */
+function providerAccepted(entry: ReplayEntry): boolean {
+  switch (entry.kind) {
+    case 'chunks':
+    case 'hang':
+      return true
+    case 'throw':
+      return entry.accepted ?? entry.chunks.length > 0
+    /* v8 ignore next -- override parsing and derived entries close the local union before replay. */
+    default:
+      return assertNever(entry, 'llm-replay acceptance entry')
+  }
+}
+
 /**
  * Install per-session positional replay. A newly seen live session takes the
  * next ordered recorded script, then advances its own cursor synchronously at
@@ -737,6 +1032,7 @@ export function installLlmReplay(ctx: Context, config: ReplayConfig): ReplayHand
   // next not-yet-bound script (scripts are in bind order); `nextScript` is the
   // index of the next unclaimed one.
   const bound = new Map<string, { entries: ReplayEntry[]; cursor: number }>()
+  const liveSessionIds: (string | undefined)[] = Array.from({ length: scripts.length })
   let nextScript = 0
   const ANON = '\0anon\0' // the key for a call that carries no sessionId
   const replay = (options: GenerateOptions): AsyncIterable<StreamChunk> => {
@@ -752,9 +1048,11 @@ export function installLlmReplay(ctx: Context, config: ReplayConfig): ReplayHand
         unrecorded = true
         state = { entries: [], cursor: 0 }
       } else {
+        const scriptIndex = nextScript
         nextScript++
         state = { entries: script.entries, cursor: 0 }
         bound.set(key, state)
+        if (key !== ANON) liveSessionIds[scriptIndex] = key
       }
     }
     const boundState = state
@@ -775,7 +1073,23 @@ export function installLlmReplay(ctx: Context, config: ReplayConfig): ReplayHand
           + `but its script has only ${boundState.entries.length}; re-record the scenario`,
         )
       }
-      yield* replayEntry(resolveScriptedEntry(entry, options.messages), options.signal, paceMs)
+      inferStartedSubagents(options.messages, liveSessionIds)
+      const resolved = resolveScriptedEntry(materializeSessionTokens(entry, liveSessionIds), options.messages)
+      if (options.provider === 'deepseek-official' && providerAccepted(resolved)) {
+        const extensions = ctx.get('deepseekLlmApiExtensions')
+        if (extensions !== undefined) {
+          const signal = options.signal ?? new AbortController().signal
+          const prepared = await extensions.prepare({
+            // Replay reproduces post-2xx side effects, not the provider wire body.
+            body: { messages: [] },
+            signal,
+            ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
+            ...options.purpose === undefined ? {} : { purpose: options.purpose },
+          })
+          await prepared.accept()
+        }
+      }
+      yield* replayEntry(resolved, options.signal, paceMs)
     })()
   }
   const providers = config.providers ?? []
@@ -823,16 +1137,39 @@ export interface Config {
   paceMs?: number
 }
 
-function validateConfiguredModalities(providers: ReplayProviderConfig[] | undefined): void {
+function validateConfiguredModels(providers: ReplayProviderConfig[] | undefined): void {
   for (const provider of providers ?? []) {
     for (const model of provider.models ?? []) {
       const modalities: unknown = model.inputModalities
-      if (modalities === undefined) continue
-      if (!Array.isArray(modalities)
-        || !modalities.every((modality: unknown) => modality === 'text' || modality === 'image')) {
+      if (modalities !== undefined && (!Array.isArray(modalities)
+        || !modalities.every((modality: unknown) => modality === 'text' || modality === 'image'))) {
         throw new Error(
           `llm-replay: provider "${provider.id}" model "${model.id}" inputModalities `
           + 'must be an array containing only "text" and "image"',
+        )
+      }
+      const imageRequestTokens: unknown = model.imageRequestTokens
+      if (imageRequestTokens !== undefined
+        && (!Number.isSafeInteger(imageRequestTokens) || (imageRequestTokens as number) <= 0)) {
+        throw new Error(
+          `llm-replay: provider "${provider.id}" model "${model.id}" imageRequestTokens `
+          + 'must be a positive safe integer',
+        )
+      }
+      // A text-only route never sends visual tokens: LlmRuntime substitutes
+      // its images with deterministic text before dispatch, so declared
+      // visual pricing would contradict the actual request projection.
+      if (imageRequestTokens !== undefined && model.inputModalities?.includes('image') !== true) {
+        throw new Error(
+          `llm-replay: provider "${provider.id}" model "${model.id}" imageRequestTokens `
+          + 'requires inputModalities to include "image"',
+        )
+      }
+      const systemPromptUpdate: unknown = model.systemPromptUpdate
+      if (systemPromptUpdate !== undefined && systemPromptUpdate !== 'in-history') {
+        throw new Error(
+          `llm-replay: provider "${provider.id}" model "${model.id}" systemPromptUpdate `
+          + 'must be "in-history" when present',
         )
       }
     }
@@ -844,7 +1181,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   if (file === undefined || file.length === 0) {
     throw new Error('llm-replay: a fixture path is required (Config.file or $DSH_SNAPSHOT_FILE)')
   }
-  validateConfiguredModalities(config.providers)
+  validateConfiguredModels(config.providers)
   const overrideFile = config.overrideFile ?? process.env.DSH_SNAPSHOT_OVERRIDE
   const childEnv = process.env.DSH_SNAPSHOT_CHILD_FILES
   const childFiles = config.childFiles

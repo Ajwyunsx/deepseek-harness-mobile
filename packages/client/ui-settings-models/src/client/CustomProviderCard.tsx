@@ -7,7 +7,7 @@
  * the provider editor with extra fields: the route id is being *chosen* here,
  * and the settings address does not exist until it is. One `settings.mutate`
  * sets the whole profile at `providers.<route>`; the key travels separately
- * through `credentials.set` under the reference the profile records, exactly as
+ * through `credentials/set` under the reference the profile records, exactly as
  * an existing provider's key does.
  *
  * The three fields a hand-declared route cannot default — endpoint, protocol,
@@ -23,13 +23,14 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { validateDeepSeekModels } from './DeepSeekModelsEditor.tsx'
 import { ModelListEditor } from './ModelListEditor.tsx'
 import type { ModelDraft } from './ModelListEditor.tsx'
-import { deriveKeyRef, messageOf } from './store.ts'
+import { deriveKeyRef } from './store.ts'
+import type { ModelsOperations } from './operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -46,6 +47,15 @@ const NS = 'llm-pi-ai'
  */
 const ROUTE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 /** Props of {@link CustomProviderCard}. */
 export interface CustomProviderCardProps {
   /** Route ids already declared, so the card refuses to shadow one. */
@@ -58,8 +68,8 @@ export interface CustomProviderCardProps {
    * than a silent overwrite of its whole profile.
    */
   revision: number
-  /** Wire faces for the write and for interrogating the endpoint. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  /** The Host operations this card writes and interrogates through. */
+  operations: ModelsOperations
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Disable writes (read-only settings provider). */
@@ -74,9 +84,8 @@ export interface CustomProviderCardProps {
  * @returns the creation card.
  */
 export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
-  const { taken, protocols, api, t } = props
-  // Captured at mount, like the editor's: the write must be judged against the
-  // section this card was drafted over, not whatever it grew into meanwhile.
+  const { taken, protocols, operations, t } = props
+  // The write is checked against the revision on which this draft was opened.
   const [openedAt] = useState(() => props.revision)
   const [route, setRoute] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -98,6 +107,8 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
 
   const routeInvalid = route.length > 0 && !ROUTE_PATTERN.test(route)
   const routeTaken = taken.includes(route)
+  const normalizedBaseURL = baseURL.trim()
+  const baseUrlInvalid = baseURL.length > 0 && !isHttpUrl(normalizedBaseURL)
   // Rows are checked by the same per-row validator the editor cards use, so a
   // bad row is named by its position here too. Capacities have route-level
   // fallbacks; what a route cannot default is at least one model.
@@ -108,7 +119,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   // legitimately authenticate through the provider's own ambient discovery.
   const keyValue = keyDraft.trim()
   const ready = route.length > 0 && !routeInvalid && !routeTaken
-    && baseURL.length > 0 && models.length > 0 && modelFailure === undefined
+    && normalizedBaseURL.length > 0 && !baseUrlInvalid && models.length > 0 && modelFailure === undefined
     && keyFailure === undefined
   // The one blocked gate worth a line under the form. A satisfied card says
   // nothing at all rather than printing an empty paragraph.
@@ -120,9 +131,9 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
     // Same for the route id, and it must be tested rather than assumed: the
     // fallback arm below reads "no models yet", so an unmet route gate would
     // fall through to it and contradict the filled-in list right above.
-    || route.length === 0 || routeInvalid || routeTaken
+    || route.length === 0 || routeInvalid || routeTaken || baseUrlInvalid
     ? undefined
-    : baseURL.length === 0
+    : normalizedBaseURL.length === 0
       ? t('customNeedsBaseUrl')
       : modelFailure !== undefined
         ? `${t('model')} ${String(modelFailure.index + 1)}: ${t(modelFailure.key)}`
@@ -141,18 +152,20 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         // chain, ADC) instead of resolving a reference nothing ever sets.
         ...storesKey ? { apiKeyEnv: keyRef } : {},
         api: protocol,
-        baseURL,
+        baseURL: normalizedBaseURL,
         models: models.map(model => ({ ...model })),
       }
-      const response = await api.settings.mutate({
-        ns: NS,
-        ops: [{ op: 'set', path: ['providers', route], value: profile }],
-        // `taken` is a snapshot too, so the id check alone cannot see a route
-        // declared after this card opened; the revision makes that race a
-        // `settings-conflict` instead of a write over the other profile.
-        expectedRevision: openedAt,
-      })
-      if (!response.result.ok) return response.result.error.message
+      // `taken` is a snapshot too, so the id check alone cannot see a route
+      // declared after this card opened; the revision makes that race a
+      // `settings-conflict` instead of a write over the other profile.
+      const written = await operations.writeSettings(
+        NS,
+        [{ op: 'set', path: ['providers', route], value: profile as JsonValue }],
+        openedAt,
+      )
+      if (written.kind !== 'written') {
+        return written.kind === 'conflict' ? t('conflict') : written.message
+      }
       // The provider now exists. A retry after the key write below fails must
       // not re-run this mutate: the revision it holds is the one this write
       // just superseded, so the Host would answer `settings-conflict` and the
@@ -160,10 +173,10 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
       setCommitted(true)
     }
     if (storesKey) {
-      const stored = await api.credentials.set({ ref: keyRef, value: keyValue })
+      const stored = await operations.storeCredential(keyRef, keyValue)
       // The profile landed; saying the key did not is the only honest report,
       // and the retry above now goes straight back to this write.
-      if (!stored.result.ok) return stored.result.error.message
+      if (stored !== undefined) return stored
     }
     return undefined
   }
@@ -178,10 +191,6 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         return
       }
       props.onClose(true)
-    } catch (error) {
-      // A transport failure rejects rather than answering; without this the
-      // card would stay busy with nothing shown.
-      setFailure(messageOf(error))
     } finally {
       setBusy(false)
     }
@@ -227,12 +236,14 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
           className={styles['input']}
           type="text"
           value={baseURL}
-          placeholder="https://gateway.example/v1"
+          placeholder={t('customBaseUrlPlaceholder')}
           aria-label={t('baseUrl')}
+          aria-invalid={baseUrlInvalid}
           disabled={profileDisabled}
           onChange={(event) => { setBaseURL(event.target.value) }}
         />
       </div>
+      {baseUrlInvalid ? <p className={styles['error']}>{t('customBaseUrlInvalid')}</p> : null}
       <div className={styles['field']}>
         <span className={styles['fieldLabel']}>{t('customApi')}</span>
         <select
@@ -269,12 +280,14 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         onChange={setModels}
         probe={{
           settingsNs: NS,
-          baseURL,
+          baseURL: normalizedBaseURL,
           api: protocol,
           ...keyValue.length === 0 ? {} : { apiKey: keyValue },
         }}
-        probeBlocked={keyFailure === 'keyBlank' ? 'keyBlankNew' : keyFailure}
-        api={api}
+        probeBlocked={baseUrlInvalid
+          ? 'customBaseUrlInvalid'
+          : keyFailure === 'keyBlank' ? 'keyBlankNew' : keyFailure}
+        operations={operations}
         t={t}
         disabled={profileDisabled}
       />
@@ -286,8 +299,8 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         t={t}
         busy={busy}
         submitDisabled={disabled || !ready}
-        submitLabel="create"
-        submitBusyLabel="creating"
+        submitLabelKey="create"
+        submitBusyLabelKey="creating"
         onCancel={() => { props.onClose(committed) }}
         onSubmit={() => { void create() }}
       />

@@ -9,6 +9,9 @@
   ],
   "references": [
     {
+      "path": "../../util/brand"
+    },
+    {
       "path": "../../../vendor/cordis"
     },
     {
@@ -24,10 +27,13 @@
       "path": "../ui-primitives"
     },
     {
-      "path": "../runtime"
+      "path": "../store"
     },
     {
-      "path": "../../runtime-diagnostics/invariants"
+      "path": "../ui-renderer"
+    },
+    {
+      "path": "../ui-session"
     }
   ]
 }

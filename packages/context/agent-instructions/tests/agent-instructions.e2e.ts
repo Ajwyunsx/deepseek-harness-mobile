@@ -4,13 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import * as WorkspaceContext from '@deepseek-ai/dsh-agent-instructions'
 import { candidateScopeKey } from '../src/render.ts'
@@ -37,11 +34,9 @@ async function harness(): Promise<{ ctx: Context; agent: Agent }> {
   await mkdir(join(workdir, '.git'), { recursive: true })
   await writeFile(join(workdir, 'AGENTS.md'), `If the user asks for the workspace context handshake, reply with exactly this string and nothing else: ${PROBE}.\n`)
   ctx = new Context()
-  await ctx.plugin(LlmRuntime)
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: 'Answer the user exactly and concisely.' })
-  await ctx.plugin(ToolRuntime)
-  await ctx.plugin(AgentRegistry)
+  await mountAgentLoopTestDependencies(ctx, {
+    systemPrompt: { personaPrefix: 'Answer the user exactly and concisely.' },
+  })
   await ctx.plugin(LocalFileSystem, { cwd: '/' })
   await ctx.plugin(ToolFs)
   await ctx.plugin(WorkspaceContext, { maxBytes: 65536 })
@@ -66,7 +61,7 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
   })
 }
 
-function finalText(events: SessionEvent[]): string {
+function finalText(events: readonly SessionEvent[]): string {
   const message = events.findLast(event => event.type === 'assistant/message')
   if (message?.type !== 'assistant/message') return ''
   return message.data.message.content
@@ -82,7 +77,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('workspace context e2e: real mode
     live.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Workspace context handshake?' }], source: { kind: 'user' } }))
     await waitForIdle(live.ctx, live.agent)
 
-    expect(finalText([...live.agent.session.events])).toContain(PROBE)
+    expect(finalText(live.agent.session.snapshotEvents())).toContain(PROBE)
   }, 120_000)
 
   it('loads a nested AGENTS.md after the real read tool touches a descendant file', async () => {
@@ -94,7 +89,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('workspace context e2e: real mode
     live.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Use the read tool to inspect pkg/deep/file.txt. After reading it, answer: nested instruction handshake?' }], source: { kind: 'user' } }))
     await waitForIdle(live.ctx, live.agent)
 
-    expect(finalText([...live.agent.session.events])).toContain(NESTED_PROBE)
+    expect(finalText(live.agent.session.snapshotEvents())).toContain(NESTED_PROBE)
   }, 120_000)
 
   it('appends changed baseline instructions after a real file-tool touch without rewriting the frozen prefix', async () => {
@@ -107,7 +102,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('workspace context e2e: real mode
     live.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'You must use the read tool to inspect trigger.txt. After reading it, answer: updated workspace context handshake?' }], source: { kind: 'user' } }))
     await waitForIdle(live.ctx, live.agent)
 
-    const events = [...live.agent.session.events]
+    const events = live.agent.session.snapshotEvents()
     const update = events.find(event => event.type === 'user/message'
       && event.data.source.kind === 'agent-instructions'
       && event.data.source.baseline !== true)

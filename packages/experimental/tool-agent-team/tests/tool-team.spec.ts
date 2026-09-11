@@ -6,10 +6,11 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import SubagentService from '@deepseek-ai/dsh-subagent'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
@@ -24,7 +25,6 @@ const SIGNAL = new AbortController().signal
 const TOOL_NAMES = [
   'spawn_teammate',
   'send_message',
-  'followup_task',
   'list_agents',
   'wait_agent',
   'interrupt_agent',
@@ -37,6 +37,17 @@ const TOOL_NAMES = [
 const roots: string[] = []
 let callNumber = 0
 
+/** Session query implementation whose search faces are outside these tests. */
+class TestSessionQuery extends SessionQueryEngine {
+  override searchSessions(): Promise<never> {
+    return Promise.reject(new Error('session search is not configured in this test'))
+  }
+
+  override searchEvents(): Promise<never> {
+    return Promise.reject(new Error('event search is not configured in this test'))
+  }
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -47,6 +58,7 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legac
   const storageRoot = mkdtempSync(join(tmpdir(), 'dsh-tool-team-'))
   roots.push(storageRoot)
   await ctx.plugin(JsonlSessionPersistence, { root: storageRoot })
+  await ctx.plugin(TestSessionQuery)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentService)
   if (legacyControl) await ctx.plugin(ToolSubagentControl)
@@ -56,7 +68,7 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legac
   const fiber = await ctx.plugin(toolTeam)
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
-  const lead = ctx.agentLoop.create(SessionId('tool-team-lead'), { provider: 'mock', model: 'mock' })
+  const lead = await ctx.agentLoop.create(SessionId('tool-team-lead'), { provider: 'mock', model: 'mock' })
   return { ctx, lead, fiber }
 }
 
@@ -68,7 +80,7 @@ function execute(
   signal: AbortSignal = SIGNAL,
 ) {
   return ctx.tools.execute({
-    callId: CallId(`team-call-${++callNumber}`),
+    callId: ToolCallId(`team-call-${++callNumber}`),
     name,
     arguments: args,
     signal,
@@ -136,6 +148,11 @@ describe('dsh-tool-team', () => {
     expect(childAssembly.tools.map(schema => schema.name).filter(name => TOOL_NAMES.includes(name)).sort())
       .toEqual(TOOL_NAMES)
     expect(renderPrompt(childAssembly)).toContain('Your Team role is teammate; your Team name is tool-worker')
+    const initialPrompt = child.session.snapshotEvents().find(event => event.type === 'user/message'
+      && event.data.source.kind === 'user')
+    expect(initialPrompt?.type === 'user/message'
+      ? initialPrompt.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+      : []).toEqual(['stay available'])
 
     const denied = await execute(ctx, child, 'spawn_teammate', {
       name: 'nested', description: 'not allowed', prompt: 'no',
@@ -159,7 +176,7 @@ describe('dsh-tool-team', () => {
       timedOut: false,
       noProgress: {
         reason: 'no-active-peer',
-        message: 'No other Team member is running or provisioning. wait_agent cannot make progress or wake inactive teammates. Re-list with list_agents and team_task_list, then use followup_task to wake each required inactive teammate before waiting again.',
+        message: 'No other Team member is running or provisioning. wait_agent cannot make progress or wake inactive teammates. Re-list with list_agents and team_task_list, then use send_message to wake each required inactive teammate before waiting again.',
       },
     })
     for (const timeout_ms of [9_999, 3_600_001, Number.MAX_SAFE_INTEGER + 1]) {
@@ -201,12 +218,12 @@ describe('dsh-tool-team', () => {
     // Every Team result reaches the model as compact JSON: indentation would
     // spend tokens on every roster, task, and receipt without adding meaning.
     expect(text(roster)).toBe(JSON.stringify(JSON.parse(text(roster))))
-    const peer = await execute(ctx, child, 'send_message', { target: 'lead', message: 'quiet report' })
+    const peer = await execute(ctx, child, 'send_message', { target: 'lead', message: 'progress report' })
     expect(peer.isError).toBe(false)
     expect(JSON.parse(text(peer))).toMatchObject({ status: 'accepted' })
-    const waking = await execute(ctx, child, 'followup_task', { target: 'lead', message: 'review the report' })
-    expect(waking.isError).toBe(false)
-    expect(JSON.parse(text(waking))).toMatchObject({ status: 'accepted' })
+    const followup = await execute(ctx, child, 'send_message', { target: 'lead', message: 'review the report' })
+    expect(followup.isError).toBe(false)
+    expect(JSON.parse(text(followup))).toMatchObject({ status: 'accepted' })
     await lead.whenIdle()
 
     const created = await execute(ctx, lead, 'team_task_create', {
@@ -359,7 +376,7 @@ describe('dsh-tool-team', () => {
 
     await fiber.dispose()
     const legacySchema = (await assembly(ctx, lead)).tools.find(schema => schema.name === 'send_message')
-    expect(JSON.stringify(legacySchema)).toContain('subagent_id')
+    expect(JSON.stringify(legacySchema)).toContain('agent_id')
   })
 
   it('rolls back partial scoped installation after a same-scope collision', async () => {
@@ -405,7 +422,6 @@ describe('dsh-tool-team', () => {
     await ctx.agentTeams.sendMessage(lead, {
       target: 'cold-worker',
       content: [{ type: 'text', text: 'resume with Team scope' }],
-      delivery: 'wakeup',
       signal: SIGNAL,
     })
     const resumed = await waitRunning(ctx, childId)

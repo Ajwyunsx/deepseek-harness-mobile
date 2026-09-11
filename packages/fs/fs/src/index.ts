@@ -126,6 +126,19 @@ export abstract class FileSystem extends Service {
   abstract processPath(target: FsTarget): string
 
   /**
+   * Map an absolute path from the harness host into this filesystem's
+   * execution world when both paths identify the same file. The base provider
+   * exposes no mapping; host-backed or explicitly shared backends override it.
+   * @param hostPath - absolute path in the harness host filesystem.
+   * @returns the process path for the same file, or undefined when this
+   *   execution world cannot read that host file.
+   */
+  processPathFromHostPath(hostPath: string): string | undefined {
+    void hostPath
+    return undefined
+  }
+
+  /**
    * Return the canonical `file:` URI for a target in this filesystem's
    * execution world. Backends own URI encoding because the host platform may
    * differ from the execution platform.
@@ -197,6 +210,21 @@ export abstract class FileSystem extends Service {
    * @returns the full raw content, at most `maxBytes` long.
    */
   abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>
+
+  /**
+   * Read one byte window of the regular file as raw bytes with no decoding or
+   * binary rejection: the bytes at `[offset, offset + length)`, shorter when
+   * the file ends inside the window and empty when `offset` lies at or past
+   * its end. The window is the bound here, not the file: a backend transfers
+   * at most `length` bytes of content beyond the prefix it skips to reach
+   * `offset` and never buffers the whole file, so the caller's cap on `length`
+   * is the guard against unbounded buffering.
+   * @param target - the resolved target to read.
+   * @param range - `offset`, the 0-based first byte, and `length`, the largest byte count; both non-negative integers.
+   * @param signal - aborts the read.
+   * @returns the window's bytes, at most `length` long.
+   */
+  abstract readByteRange(target: FsTarget, range: { offset: number; length: number }, signal?: AbortSignal): Promise<Uint8Array>
 
   /**
    * List direct children of a directory in stable name order. Returns resolved

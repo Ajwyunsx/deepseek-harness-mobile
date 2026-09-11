@@ -22,6 +22,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 
   interface TypertContextMap {
     registryFixture: TypertContext<string>
+    registryFixtureOther: TypertContext<string>
   }
 }
 
@@ -335,6 +336,7 @@ describe('TypertRegistry', () => {
     })
     const disposeClient = ctx.typert.contexts.registerClient('registryFixture', {
       identity: candidate => candidate === scoped ? object.id : undefined,
+      resolve: id => id === object.id ? scoped : undefined,
     })
 
     expect(ctx.typert.lookups.get('fixture')?.resolve('agent-1')).toBe(object)
@@ -347,6 +349,7 @@ describe('TypertRegistry', () => {
     }])
     expect(ctx.typert.contexts.getHost('registryFixture')?.resolve('agent-1')).toBe(scoped)
     expect(ctx.typert.contexts.getClient('registryFixture')?.identity(scoped)).toBe('agent-1')
+    expect(ctx.typert.contexts.getClient('registryFixture')?.resolve('agent-1')).toBe(scoped)
 
     await Promise.all([disposeClient(), disposeHost(), disposeLookup()])
     expect(ctx.typert.lookups.keys()).toEqual([])
@@ -440,7 +443,10 @@ describe('TypertRegistry', () => {
       wireTypeSymbol: '@fixture#AgentId',
       resolve: () => undefined,
     }
-    const client = { identity: () => undefined }
+    const client = {
+      identity: (_candidate: Context) => undefined,
+      resolve: () => undefined,
+    }
     const disposeLookup = ctx.typert.lookups.register('fixture', lookup)
     const disposeHost = ctx.typert.contexts.registerHost('registryFixture', host)
     const disposeClient = ctx.typert.contexts.registerClient('registryFixture', client)
