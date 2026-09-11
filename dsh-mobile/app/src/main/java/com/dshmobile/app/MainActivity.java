@@ -30,7 +30,6 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -207,6 +206,10 @@ public class MainActivity extends Activity {
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
         s.setJavaScriptCanOpenWindowsAutomatically(true);
+        // dsh 0.1.5 签发的会话 cookie 必须被 WebView 接收并回送，否则每次请求都 401
+        android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+        cm.setAcceptCookie(true);
+        cm.setAcceptThirdPartyCookies(webView, true);
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
@@ -218,7 +221,18 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 if (pageFailed) return;
                 injector.inject(view);
-                dismissSplash();
+                // dsh 0.1.5 鉴权：若这一页是 401 文案（"authentication required"），
+                // 说明没带上有效 token/cookie——等认证 URL 就绪后重载一次。
+                view.evaluateJavascript(
+                        "(function(){var t=(document.body&&document.body.innerText)||'';"
+                                + "return t.indexOf('authentication required')>=0;})()",
+                        value -> {
+                            if ("true".equals(value)) {
+                                scheduleReload();
+                            } else {
+                                dismissSplash();
+                            }
+                        });
             }
 
             @Override
@@ -432,15 +446,20 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            // 服务已在应答后，等 dsh 把带 token 的认证 URL 刷进日志（通常同一
-            // tick，宽限 5s）；轮询不到就退回干净 URL（旧 cookie 仍可能有效）。
+            // 服务已在应答后，等 HarnessService 从 dsh web stdout 抓到带 token
+            // 的认证 URL。首次启动要装配整棵插件树，可能明显超过 5s；给足 60s，
+            // 期间持续刷新启动屏。抓不到再退回干净 URL（旧 cookie 可能仍有效），
+            // 由 onPageFinished 的 401 兜底再补一次。
             String auth = null;
-            long urlDeadline = System.currentTimeMillis() + 5_000;
-            while (auth == null && System.currentTimeMillis() < urlDeadline) {
+            long urlDeadline = System.currentTimeMillis() + 60_000;
+            while (auth == null && !stopPolling
+                    && System.currentTimeMillis() < urlDeadline) {
                 auth = authenticatedUrl();
                 if (auth == null) {
+                    final long left = (urlDeadline - System.currentTimeMillis()) / 1000;
+                    handler.post(() -> splashStatus.setText("正在等待认证链接… (" + left + "s)"));
                     try {
-                        Thread.sleep(200);
+                        Thread.sleep(250);
                     } catch (InterruptedException e) {
                         break;
                     }
@@ -463,37 +482,78 @@ public class MainActivity extends Activity {
     /**
      * dsh 0.1.5 起 Web 入口带 token 鉴权：进程启动时打印
      * `dsh web: http://127.0.0.1:<port>/?token=<随机值>`，根路径无 token/无
-     * 有效 cookie 直接 401。此方法从 dsh-web.log 取**最后一条**本端口、带
-     * token 的行，交给 WebView 首次加载；服务端校验后 303 到 `/` 并种下按
-     * host:port 绑定的签名 cookie，之后同源请求自动带上。
+     * 有效 cookie 直接 401。HarnessService 从 dsh web 的 stdout 实时抓取该
+     * URL（见 {@link HarnessService#getWebAuthUrl()}），此处只读内存值：
+     * 绝不回退去扫 dsh-web.log——日志跨进程重启追加，旧进程的 token 会先于
+     * 新进程被读到，拿去交换必然 401。
      *
-     * @return 带 token 的完整 URL；日志里还没有时返回 {@code null}。
+     * @return 当前进程带 token 的完整 URL；尚未打印时返回 {@code null}。
      */
     private String authenticatedUrl() {
-        File log = new File(ProotRunner.baseDir(this), "dsh-web.log");
-        if (!log.isFile()) return null;
-        String host = "127.0.0.1:" + port;
-        String best = null;
-        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                new java.io.InputStreamReader(new java.io.FileInputStream(log), "UTF-8"))) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                int at = line.indexOf("dsh web: http");
-                if (at < 0) continue;
-                String s = line.substring(at + "dsh web: ".length()).trim();
-                int sp = s.indexOf(' ');
-                if (sp >= 0) s = s.substring(0, sp);
-                if (s.contains(host) && s.contains("token=")) best = s;
-            }
-        } catch (Exception ignored) {
-            // 日志不可读：当作没有认证 URL，退回干净根路径
-        }
-        return best;
+        String live = HarnessService.getWebAuthUrl();
+        if (live != null && live.contains("token=")) return live;
+        return null;
     }
 
     private void loadMainUrl(String authUrl) {
         loadAttempts++;
-        webView.loadUrl(authUrl != null ? authUrl : "http://127.0.0.1:" + port + "/");
+        final String root = "http://127.0.0.1:" + port + "/";
+        if (authUrl == null) {
+            webView.loadUrl(root);
+            return;
+        }
+        // 先在后台用本机 HTTP 自己完成 token 交换，把服务端下发的 Set-Cookie
+        // 直接塞进 WebView 的 CookieManager，再加载干净根路径。这样不依赖
+        // WebView 对 303 跳转+跨响应种 cookie 的实现差异，鉴权确定成功。
+        final String url = authUrl;
+        new Thread(() -> {
+            final String cookie = exchangeTokenForCookie(url);
+            handler.post(() -> {
+                if (isFinishing()) return;
+                if (cookie != null) {
+                    android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+                    cm.setCookie(root, cookie);
+                    cm.flush();
+                    webView.loadUrl(root);
+                } else {
+                    // 交换失败（token 过期等）：退回让 WebView 自己跟随 303
+                    webView.loadUrl(url);
+                }
+            });
+        }, "dsh-token-exchange").start();
+    }
+
+    /**
+     * 直接请求认证 URL，返回服务端下发的会话 cookie（`name=value`）。
+     * 期望 303 + `Set-Cookie`；token 失效时服务端返回 401，此时返回 null。
+     *
+     * @param authUrl HarnessService 捕获的带 token 认证 URL
+     * @return 可直接写入 WebView CookieManager 的 cookie；失败返回 {@code null}
+     */
+    private String exchangeTokenForCookie(String authUrl) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(authUrl).openConnection();
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(5000);
+            conn.setInstanceFollowRedirects(false);
+            int code = conn.getResponseCode();
+            if (code < 300 || code >= 400) return null;
+            for (java.util.Map.Entry<String, java.util.List<String>> e
+                    : conn.getHeaderFields().entrySet()) {
+                if (e.getKey() == null || !"Set-Cookie".equalsIgnoreCase(e.getKey())) continue;
+                for (String v : e.getValue()) {
+                    if (v == null || v.isEmpty()) continue;
+                    int semi = v.indexOf(';');
+                    return semi >= 0 ? v.substring(0, semi) : v;
+                }
+            }
+        } catch (Exception ignored) {
+            // 连接失败：退回 WebView 直接加载
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        return null;
     }
 
     /** 主框架加载失败：恢复启动屏提示并有界自动重试（容器可能尚在预热或刚重启）。 */
@@ -505,9 +565,26 @@ public class MainActivity extends Activity {
                 return;
             }
             showSplash("连接 Web 服务失败，正在重试…");
-            handler.postDelayed(() -> {
-                if (!isFinishing()) loadMainUrl(authenticatedUrl());
-            }, 2000);
+            // 重载前先在后台等认证 URL（最多 30s）：容器重启/首启慢时 token
+            // 可能还没打印，直接回退干净路径会再次撞上 401
+            new Thread(() -> {
+                String auth = null;
+                long deadline = System.currentTimeMillis() + 30_000;
+                while (auth == null && !stopPolling && System.currentTimeMillis() < deadline) {
+                    auth = authenticatedUrl();
+                    if (auth == null) {
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException e) {
+                            break;
+                        }
+                    }
+                }
+                final String a = auth;
+                handler.postDelayed(() -> {
+                    if (!isFinishing()) loadMainUrl(a);
+                }, 1000);
+            }, "dsh-auth-wait").start();
         });
     }
 

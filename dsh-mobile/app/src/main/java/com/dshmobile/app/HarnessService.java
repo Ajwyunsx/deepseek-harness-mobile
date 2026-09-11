@@ -28,6 +28,8 @@ public class HarnessService extends Service {
     private static Process process;
     private static Process sshdProcess;
     private static boolean running;
+    /** dsh web 启动时打印的带 token 认证 URL（当前进程），供 WebView 首登。 */
+    private static volatile String webAuthUrl;
 
     private ExecutorService executor;
     private PowerManager.WakeLock wakeLock;
@@ -35,6 +37,11 @@ public class HarnessService extends Service {
 
     public static boolean isRunning() {
         return running && process != null && process.isAlive();
+    }
+
+    /** @return 当前 dsh web 的认证 URL；尚未打印或不匹配当前端口时为 null。 */
+    public static String getWebAuthUrl() {
+        return webAuthUrl;
     }
 
     public static void startService(Context ctx) {
@@ -95,11 +102,18 @@ public class HarnessService extends Service {
                         ? "node-pty 修复完成，正在启动…"
                         : "node-pty 修复失败，请到设置查看日志");
             }
+            final int port = prefs.getPort();
             try {
-                updateNotification("DeepSeek Harness 运行中 · 端口 " + prefs.getPort());
+                updateNotification("DeepSeek Harness 运行中 · 端口 " + port);
                 startSshd(prefs, log);
-                process = ProotRunner.startWeb(this, prefs.getPort(), log);
+                // 新进程开始前清掉上一轮的 token，避免 WebView 拿到过期 URL
+                webAuthUrl = null;
+                process = ProotRunner.startWeb(this, port);
                 running = true;
+                final Process p = process;
+                Thread pump = new Thread(() -> pumpWebOutput(p, log, port), "dsh-web-log");
+                pump.setDaemon(true);
+                pump.start();
                 int code = process.waitFor();
                 running = false;
                 if (!wantRun) break;
@@ -127,6 +141,46 @@ public class HarnessService extends Service {
         }
     }
 
+    /**
+     * 实时吞掉 dsh web 的 stdout：逐行写入日志，并抓取带 token 的认证 URL。
+     * 用管道而非文件重定向解析日志，既避免文件 flush 延迟/旧进程残留 token，
+     * 也让 MainActivity 能立刻拿到当前进程的认证 URL。
+     */
+    private void pumpWebOutput(Process p, File log, int port) {
+        java.io.FileWriter w = null;
+        try {
+            w = new java.io.FileWriter(log, true);
+        } catch (Exception ignored) {
+            // 日志不可写也不能停读管道：否则子进程 stdout 塞满会卡死
+        }
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.InputStreamReader(p.getInputStream(), "UTF-8"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (w != null) {
+                    try {
+                        w.write(line);
+                        w.write('\n');
+                        w.flush();
+                    } catch (Exception ignored) {
+                        // 单行写失败忽略，继续读
+                    }
+                }
+                String auth = ProotRunner.extractAuthUrl(line, port);
+                if (auth != null) webAuthUrl = auth;
+            }
+        } catch (Exception ignored) {
+            // 进程结束/管道关闭：正常退出路径
+        } finally {
+            if (w != null) {
+                try {
+                    w.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
     /** 启动容器内 sshd：老容器没有就先联网补装（失败不影响 Web 服务）。 */
     private void startSshd(Prefs prefs, File log) {
         BootstrapInstaller.ensureSshServerInstalled(this, log);
@@ -143,6 +197,7 @@ public class HarnessService extends Service {
         // 状态先置 false：设置页/按钮立即反映"已停止"，
         // 不必等强杀兜底（最长 3s）走完
         running = false;
+        webAuthUrl = null;
         Process p = process;
         if (p != null) {
             p.destroy();

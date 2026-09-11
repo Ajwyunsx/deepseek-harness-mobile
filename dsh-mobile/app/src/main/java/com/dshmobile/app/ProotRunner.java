@@ -168,8 +168,11 @@ public final class ProotRunner {
         }
     }
 
-    /** 启动 dsh web 服务进程。 */
-    public static Process startWeb(Context ctx, int port, File logFile) throws IOException {
+    /**
+     * 启动 dsh web 服务进程。stdout 用管道交给调用方 pump（既落日志又抓认证
+     * URL），因此不再直接重定向到文件。
+     */
+    public static Process startWeb(Context ctx, int port) throws IOException {
         List<String> inner = new ArrayList<>();
         inner.add("dsh");
         inner.add("web");
@@ -179,9 +182,28 @@ public final class ProotRunner {
         inner.add(String.valueOf(port));
         // dsh 0.1.5 起浏览器入口带 token 鉴权：不传 --no-open 会尝试拉起宿主
         // 默认浏览器（容器里必然失败，且日志多一行噪音）；带 token 的 URL 仍会
-        // 打印到日志，由 MainActivity 解析后交给 WebView 完成 cookie 交换。
+        // 打印到 stdout，由 HarnessService 实时抓取后交给 WebView 完成 cookie 交换。
         inner.add("--no-open");
-        return exec(ctx, inner, logFile);
+        return execPiped(ctx, inner);
+    }
+
+    /**
+     * 从 dsh web 的一行输出里提取带 token 的本机认证 URL。
+     * 形如 `dsh web: http://127.0.0.1:3080/?token=xxx (LAN: ...)`。
+     *
+     * @param line dsh web 的 stdout 行
+     * @param port 期望端口；不匹配的行丢弃，避免抓到旧进程残留
+     * @return 提取到的完整认证 URL；该行不是认证 URL 时返回 {@code null}
+     */
+    public static String extractAuthUrl(String line, int port) {
+        int at = line.indexOf("dsh web: http");
+        if (at < 0) return null;
+        String s = line.substring(at + "dsh web: ".length()).trim();
+        int sp = s.indexOf(' ');
+        if (sp >= 0) s = s.substring(0, sp);
+        if (!s.contains("token=")) return null;
+        if (!s.contains("127.0.0.1:" + port) && !s.contains("localhost:" + port)) return null;
+        return s;
     }
 
     /**
