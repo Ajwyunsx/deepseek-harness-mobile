@@ -123,6 +123,13 @@ public class HarnessService extends Service {
                 pump.start();
                 startSshdAsync(prefs);
                 int code = process.waitFor();
+                // 等 pump 把退出前的最后几行（含插件加载错误）读完，否则可能
+                // waitFor 先返回、brokenPlugin 还没被设置
+                try {
+                    pump.join(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
                 running = false;
                 if (!wantRun) break;
                 // 插件加载失败会拖垮整个 dsh web（plugin tree failed to load）。
