@@ -84,7 +84,7 @@ The backend builds on three ideas:
 
 ### Write path
 
-Each write probes the target, enforces the optional guard (`createIfAbsent` or `replaceIfVersion`), captures a bounded `before` diff basis when both sides are small enough, stages the new content next to the target, fsyncs, and publishes atomically. Guarded creation uses a hard-link publication that never replaces a concurrent creator, rejecting it with `FS_NOT_OBSERVED` instead.
+Each write probes the target, enforces the optional guard (`createIfAbsent` or `replaceIfVersion`), captures a bounded `before` diff basis when both sides are small enough, stages the new content next to the target, fsyncs, and publishes atomically. Guarded creation publishes a hard link that never replaces a concurrent creator, rejecting it with `FS_NOT_OBSERVED` instead; where the filesystem refuses hard links, an exclusive create holds the name and the staged file replaces it.
 
 ### Edit path
 
@@ -135,7 +135,7 @@ These limits define when the local backend is a poor fit or needs special operat
 - **A sub-limit overwrite still buffers a contextual basis** — `writeText` may retain up to just below `config.diffBasisMaxBytes` of prior text in addition to the caller-owned replacement; the bound does not cap the returned `after` value or the whole-file presentation fallback.
 - **Binary detection is asymmetric** — reads NUL-sample only the first 8192 bytes while edits scan the whole buffer, so a file with a late NUL reads fine but rejects edits.
 - **The per-target mutation lock is in-process only** — guarded creation still uses an atomic no-replace publication across processes, but replacement writers in another process are caught only when the optional version guard observes their metadata change; they are never serialized.
-- **Guarded creation requires hard-link support** — filesystems or mounts that reject hard-link publication cannot serve `createIfAbsent`; the backend preserves the missing target and reports `FS_IO_ERROR`.
+- **Guarded creation degrades instead of requiring hard links** — a filesystem that refuses `link()` holds the name with an exclusive create and replaces it with the staged file, which lets a concurrent reader observe the empty reservation; a publication that does not land a regular file (a layer that implements `link()` as a symbolic link) is reported as `FS_NOT_REGULAR_FILE` instead of leaving a dangling name.
 - **Post-commit cleanup is best effort** — a successful publication remains successful if removal of its owner-only staging directory fails, leaving private residue for later operator cleanup.
 
 <a id="dev-note"></a>

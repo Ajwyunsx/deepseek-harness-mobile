@@ -95,6 +95,8 @@ export interface FsIoInternals {
   linkFile?: (existingPath: string, newPath: string) => Promise<void>
   /** Override target inspection after guarded publication fails. */
   inspectPublicationTarget?: (path: string) => Promise<BigIntStats>
+  /** Override the rename that publishes over this write's own exclusive-create reservation. */
+  publishOverReservation?: (existingPath: string, newPath: string) => Promise<void>
   /** Override staging-directory removal for commit-point failure coverage. */
   removeStagingDir?: (stagingDir: string) => Promise<void>
   /** Test hook after the temp file is written/synced but before final chmod+publication. */
@@ -571,6 +573,99 @@ async function throwGuardedCreateFailure(
 }
 
 /**
+ * Filesystems without hard links refuse `link()` — Android's emulated and
+ * external storage, for example — with `EPERM`, `ENOTSUP`, or `EOPNOTSUPP`. The
+ * spelling varies by platform and filesystem, so any of the three selects the
+ * exclusive-create publication instead of failing the write.
+ * @param error - the rejection from the hard-link publication boundary.
+ * @returns whether the filesystem refuses hard links.
+ */
+function isHardLinkUnavailable(error: unknown): boolean {
+  return error instanceof Error && 'code' in error
+    && (error.code === 'EPERM' || error.code === 'ENOTSUP' || error.code === 'EOPNOTSUPP')
+}
+
+/**
+ * Reserve a destination the caller observed as absent without replacing a
+ * concurrent creator's file: `open` with `wx` is `O_CREAT|O_EXCL`, so an
+ * existing entry refuses the write exactly as a hard link would.
+ * @param absolutePath - destination the caller observed as absent.
+ * @param displayPath - path shown in diagnostics.
+ * @param inspectPublicationTarget - target inspection boundary that classifies the refusal.
+ * @returns the open reservation, which the caller closes before publishing.
+ */
+async function reserveExclusiveCreate(
+  absolutePath: string,
+  displayPath: string,
+  inspectPublicationTarget: (path: string) => Promise<BigIntStats>,
+): Promise<Awaited<ReturnType<typeof open>>> {
+  try {
+    return await open(absolutePath, 'wx', 0o600)
+  } catch (error: unknown) {
+    return await throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget)
+  }
+}
+
+/**
+ * Publish the staged file where the filesystem refuses hard links: the exclusive
+ * create reserves the destination name, and the rename replaces this write's own
+ * empty reservation with the synced staging file. A failed rename removes that
+ * reservation, because leaving it behind would present an empty file under a
+ * reported failure.
+ * @param tempPath - the synced staging file to publish.
+ * @param absolutePath - destination the caller observed as absent.
+ * @param displayPath - path shown in diagnostics.
+ * @param inspectPublicationTarget - target inspection boundary that classifies the refusal.
+ * @param publishOverReservation - rename boundary that replaces this write's reservation.
+ */
+async function publishExclusiveCreate(
+  tempPath: string,
+  absolutePath: string,
+  displayPath: string,
+  inspectPublicationTarget: (path: string) => Promise<BigIntStats>,
+  publishOverReservation: (existingPath: string, newPath: string) => Promise<void>,
+): Promise<void> {
+  const reservation = await reserveExclusiveCreate(absolutePath, displayPath, inspectPublicationTarget)
+  try {
+    await reservation.close()
+    await publishOverReservation(tempPath, absolutePath)
+  } catch (error: unknown) {
+    try {
+      await rm(absolutePath, { force: true })
+    } catch (_reservationRemovalFailure) {
+      // This write owns the reservation; its removal failure must not replace
+      // the publication error the caller needs.
+    }
+    throw error
+  }
+}
+
+/**
+ * Fail a publication that did not land a regular file. A filesystem layer that
+ * implements `link()` as a symbolic link reports success while the committed
+ * entry dangles as soon as staging is removed, so the caller must see the write
+ * fail instead of reading back a missing file.
+ * @param absolutePath - the published destination.
+ * @param displayPath - path shown in diagnostics.
+ * @param inspectPublicationTarget - target inspection boundary (`lstat`).
+ */
+async function assertPublishedRegularFile(
+  absolutePath: string,
+  displayPath: string,
+  inspectPublicationTarget: (path: string) => Promise<BigIntStats>,
+): Promise<void> {
+  let published: BigIntStats
+  try {
+    published = await inspectPublicationTarget(absolutePath)
+  } catch (error: unknown) {
+    throw new FsError(`cannot write "${displayPath}": published entry is unreadable`, 'FS_IO_ERROR', { cause: error })
+  }
+  if (!published.isFile()) {
+    throw new FsError(`cannot write "${displayPath}": published entry is not a regular file`, 'FS_NOT_REGULAR_FILE')
+  }
+}
+
+/**
  * Atomically replace a file through a private, synced staging file in the same directory.
  * POSIX protects the staging directory and file with `0o700` and `0o600`. A new Windows file
  * inherits the destination directory's DACL; a replacement copies the existing target's DACL
@@ -581,9 +676,10 @@ async function throwGuardedCreateFailure(
  * inert as a mode on Windows but identifies replacement security semantics.
  * @param signal - cancellation checked before final publication.
  * @param internals - Test hook for pinning temp names and observing the staged file.
- * @param createIfAbsent - when provided, publish with a hard-link no-replace
- * primitive; a concurrent creator's file is preserved and this write is
- * rejected with `FS_NOT_OBSERVED` using the supplied display path.
+ * @param createIfAbsent - when provided, publish a no-replace creation; the hard link is the
+ * primary primitive, a filesystem that refuses one falls back to an exclusive create replaced
+ * by the staged file, and either path must land a regular file. A concurrent creator's file is
+ * preserved and this write is rejected with `FS_NOT_OBSERVED` using the supplied display path.
  */
 export async function writeFileAtomic(
   absolutePath: string,
@@ -608,6 +704,7 @@ export async function writeFileAtomic(
   const linkFile = internals.linkFile ?? link
   const inspectPublicationTarget = internals.inspectPublicationTarget
     ?? (path => lstat(path, { bigint: true }))
+  const publishOverReservation = internals.publishOverReservation ?? rename
   const removeStagingDir = internals.removeStagingDir
     ?? (path => rm(path, { recursive: true, force: true }))
   let handle: Awaited<ReturnType<typeof open>> | undefined
@@ -634,8 +731,12 @@ export async function writeFileAtomic(
       try {
         await linkFile(tempPath, absolutePath)
       } catch (error: unknown) {
-        await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        if (!isHardLinkUnavailable(error)) {
+          await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        }
+        await publishExclusiveCreate(tempPath, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget, publishOverReservation)
       }
+      await assertPublishedRegularFile(absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
     } else if (platform === 'win32' && mode !== undefined) {
       try {
         await replaceFile(absolutePath, tempPath)

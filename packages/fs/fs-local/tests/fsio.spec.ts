@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chmod, mkdtemp, readFile, rename, rm, stat, symlink, unlink, writeFile, mkdir, readdir, realpath } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, readFile, rename, rm, stat, symlink, unlink, writeFile, mkdir, readdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { createServer } from 'node:net'
@@ -880,6 +880,103 @@ describe('writeFileAtomic — temp-file safety', () => {
       message: `cannot write "${displayPath}": not a regular file`,
     })
     expect((await stat(file)).isDirectory()).toBe(true)
+  })
+
+  it.each(['EPERM', 'ENOTSUP', 'EOPNOTSUPP'] as const)(
+    'publishes a guarded create where hard links are refused with %s',
+    async (code) => {
+      const file = join(dir, 'a.txt')
+      const refused = Object.assign(new Error('hard links unsupported'), { code })
+
+      await writeFileAtomic(file, 'ours', undefined, undefined, {
+        linkFile: async () => { throw refused },
+      }, { displayPath: file })
+
+      expect(await readFile(file, 'utf8')).toBe('ours')
+      if (posixModes) expect((await stat(file)).mode & 0o777).toBe(0o600)
+      expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+    },
+  )
+
+  it('rejects a hard-link-free guarded create that loses the name to a competitor', async () => {
+    const file = join(dir, 'a.txt')
+    const refused = Object.assign(new Error('hard links unsupported'), { code: 'EPERM' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw refused },
+      inspectTemp: async () => { await writeFile(file, 'competitor') },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_NOT_OBSERVED',
+      message: `cannot overwrite existing "${file}" without reading it first`,
+    })
+    expect(await readFile(file, 'utf8')).toBe('competitor')
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('rejects a guarded create whose publication lands a symbolic link', async () => {
+    const file = join(dir, 'a.txt')
+
+    // A filesystem layer that implements link() as a symlink to the staging file
+    // reports success, and removing staging then dangles the published name.
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async (existingPath, newPath) => { await symlink(existingPath, newPath) },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_NOT_REGULAR_FILE',
+      message: `cannot write "${file}": published entry is not a regular file`,
+    })
+    expect((await lstat(file)).isSymbolicLink()).toBe(true)
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('fails a guarded create whose committed entry cannot be inspected', async () => {
+    const file = join(dir, 'a.txt')
+    const inspectionFailure = Object.assign(new Error('inspection denied'), { code: 'EACCES' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      inspectPublicationTarget: async () => { throw inspectionFailure },
+    }, { displayPath: file })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: inspectionFailure })
+  })
+
+  it('removes this write\'s reservation when the hard-link-free rename fails', async () => {
+    const file = join(dir, 'a.txt')
+    const refused = Object.assign(new Error('hard links unsupported'), { code: 'EPERM' })
+    const publishFailure = Object.assign(new Error('rename failed'), { code: 'EIO' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw refused },
+      publishOverReservation: async () => { throw publishFailure },
+    }, { displayPath: file })).rejects.toBe(publishFailure)
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('reports the publication failure when the reservation cannot be removed', async () => {
+    const file = join(dir, 'a.txt')
+    const refused = Object.assign(new Error('hard links unsupported'), { code: 'EPERM' })
+    const publishFailure = Object.assign(new Error('rename failed'), { code: 'EIO' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw refused },
+      publishOverReservation: async (_tempPath, target) => {
+        // A directory reserves the name so the cleanup removal fails, which must
+        // still report the publication error rather than the cleanup one.
+        await rm(target, { force: true })
+        await mkdir(target)
+        throw publishFailure
+      },
+    }, { displayPath: file })).rejects.toBe(publishFailure)
+    expect((await stat(file)).isDirectory()).toBe(true)
+  })
+
+  it('classifies a non-Error hard-link refusal through the guarded-create path', async () => {
+    const file = join(dir, 'a.txt')
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw 'no hard links' },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_IO_ERROR',
+      message: `cannot write "${file}": no hard links`,
+    })
   })
 
   it('does not turn post-commit staging cleanup failure into a failed guarded write', async () => {
