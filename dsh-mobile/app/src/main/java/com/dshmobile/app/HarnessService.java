@@ -109,6 +109,9 @@ public class HarnessService extends Service {
                         ? "node-pty 修复完成，正在启动…"
                         : "node-pty 修复失败，请到设置查看日志");
             }
+            // 覆盖层自愈：用户在容器里重装/升级过 dsh 会把本仓库的补丁包冲掉，
+            // 内容一致时这里不做任何写入。
+            ensureHarnessOverlay(log);
             final int port = prefs.getPort();
             try {
                 updateNotification("DeepSeek Harness 运行中 · 端口 " + port);
@@ -246,6 +249,38 @@ public class HarnessService extends Service {
             return true;
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * 启动前自愈本仓库的 harness 覆盖层。
+     *
+     * <p>容器内的 {@code @deepseek-ai/dsh} 来自 npm，用户重装或升级它之后覆盖就失效
+     * 了；这里在每次启动前检查内容哈希，不一致才重新覆盖（一致时零写入）。
+     *
+     * @param logFile 追加写覆盖摘要的服务日志
+     */
+    private void ensureHarnessOverlay(File logFile) {
+        try {
+            File overlayDir = HarnessOverlayAssets.extract(this, new File(getCacheDir(), "harness-overlay"));
+            File rootfs = ProotRunner.rootfsDir(this);
+            if (!HarnessOverlay.needsApply(rootfs, overlayDir)) return;
+            updateNotification("正在重新应用本仓库补丁包…");
+            appendServiceLog(logFile, HarnessOverlay.apply(rootfs, overlayDir));
+        } catch (Exception e) {
+            appendServiceLog(logFile, "harness 覆盖层自愈失败（继续使用上游 npm 包）: " + e);
+        }
+    }
+
+    /** 追加一段摘要到服务日志文件；写日志失败不影响服务启动。 */
+    private static void appendServiceLog(File logFile, String text) {
+        try {
+            java.nio.file.Files.write(logFile.toPath(),
+                    ("\n[harness-overlay] " + text + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception ignored) {
+            // 日志不可写（磁盘满/权限）不该阻断服务启动；覆盖结果本身已经写在
+            // 通知与下一次 needsApply 的一致性检查里。
         }
     }
 

@@ -15,6 +15,7 @@
 - **浏览器 token 鉴权**：dsh 0.1.5 起 Web 入口带一次性 token（根路径无 token/无有效 cookie 直接 401）。手机版不用去抓 `dsh web` 的 stdout——会话 cookie 的签名密钥是持久化的，存在容器内 `/home/dsh/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 记录里；App 直接读该密钥、用相同算法（HMAC-SHA256）自签一枚按 `host:port` 绑定的 cookie（127.0.0.1 与 localhost 各一枚）写入 WebView，再加载干净根路径。加载前会先等「带 cookie 的根路径」返回 HTTP 200（最多 120s）才加载，避开容器/插件树装配期；抓不到密钥时回退实时捕获 `dsh web` 的带 token URL 做一次交换。`dsh web` 以 `--no-open` 启动，避免容器内无效的浏览器拉起
 - **容器 SSH**：openssh-server 随服务自启（仅监听 127.0.0.1:8022），本机终端/Termux 直接 `ssh dsh@127.0.0.1 -p 8022`（普通用户 dsh，登录 PATH 带 node/npm；root 同密码也可登），电脑走 `adb forward`；密码首次自动生成，设置页可查看/复制/改端口
 - **命令沙箱已禁用**：容器启动时钉死 `DSH_PERMISSION_MODE=danger-full-access`（proot 里 bwrap/Landlock 基本不可用，workspace-write 会报 SANDBOX_UNAVAILABLE）；dsh 的 bash/文件写入不设围栏、不逐条询问。会话里仍可手动切回 workspace-write/read-only，但沙箱 runner 不可用时受限命令会失败
+- **本仓库补丁包（harness overlay）**：容器里的 `@deepseek-ai/dsh` 是 npm 上的上游发行版，本仓库对 harness 源码的修复不会自己进容器。APK 因此携带 `assets/harness-overlay/`——由 `dsh-mobile/tools/build-harness-overlay.mjs` 从本仓库构建导出，含逐文件 sha256 清单。装完 dsh 后由 `HarnessOverlay` 用它覆盖同名包，服务每次启动前再核对一次内容哈希做自愈（一致则零写入）。覆盖前会核对已装版本，版本不匹配就整包跳过并写 `dsh-web.log`——宁可保留上游行为，也不装出错误组合。当前纳入的补丁：`@deepseek-ai/dsh-fs-local`（createIfAbsent 在无硬链接文件系统上的降级 + 发布后普通文件校验，见 issue #13）
 
 ## 使用
 
@@ -36,9 +37,12 @@
 
 注意：aarch64 Linux 主机（Google 只发布 x86_64 aapt2）需要 box64，构建时传 `./gradlew -Pandroid.aapt2FromMavenOverride=$PWD/tools/aapt2`（包装脚本会从 `ANDROID_HOME` 或 `local.properties` 的 sdk.dir 找 SDK）；x86_64 主机与 CI 直接构建即可。JDK 17+ 用环境默认（如需指定请自行在 gradle.properties 加 `org.gradle.java.home`）。签名配置在 `app/build.gradle.kts`（自带调试级 keystore，正式发布请更换）。
 
+改了被覆盖的 harness 包（`dsh-mobile/tools/build-harness-overlay.mjs` 里的 `OVERLAY_PACKAGES`）之后，先 `pnpm run build:lib:host`，再 `node dsh-mobile/tools/build-harness-overlay.mjs` 重新导出 `app/src/main/assets/harness-overlay/`；再 `node dsh-mobile/tools/verify-harness-overlay.mjs`（需要 PATH 上有 `javac`）验证覆盖逻辑与资产哈希。
+
 ## 结构
 
-- `BootstrapInstaller` — 下载/解压 rootfs、proot（Termux apt deb）、Node.js，容器内 `npm i -g @deepseek-ai/dsh`
+- `BootstrapInstaller` — 下载/解压 rootfs、proot（Termux apt deb）、Node.js，容器内 `npm i -g @deepseek-ai/dsh`，随后应用 harness 补丁包
+- `HarnessOverlay` + `HarnessOverlayAssets` — 把 APK 内 `assets/harness-overlay/` 的补丁包覆盖到容器内的 harness 安装目录（按版本 + sha256 校验，纯 java.io 实现，可用 `dsh-mobile/tools/verify-harness-overlay.mjs` 在主机上跑回归）
 - `NodePtyFixer` — node-pty 原生模块（pty.node）自检与 node-gyp 重建（安装时与服务启动前双兜底）
 - `ProotRunner` — 组装 proot 命令（bind /dev /proc /sys /tmp /mnt/sd /mnt/shared）启动 `dsh web`
 - `HarnessService` — 前台服务持有容器进程，退出自动重启（上限 5 次）

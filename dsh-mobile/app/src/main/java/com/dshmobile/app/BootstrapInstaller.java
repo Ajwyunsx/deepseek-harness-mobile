@@ -76,6 +76,23 @@ public final class BootstrapInstaller {
         if (cancelled) throw new IOException("已取消");
     }
 
+    /**
+     * 展开 assets 里随 APK 携带的 harness 覆盖层，覆盖容器内 npm 装好的同名包。
+     *
+     * <p>只打日志不抛异常：覆盖失败时容器继续用上游包（行为与不装补丁一致），
+     * 不能让一个可选步骤失败掉整个安装。版本不匹配的包会被 HarnessOverlay 跳过。
+     *
+     * @param rootfs 容器 rootfs 根目录
+     */
+    private void applyHarnessOverlay(File rootfs) {
+        try {
+            File overlayDir = HarnessOverlayAssets.extract(ctx, new File(ctx.getCacheDir(), "harness-overlay"));
+            log(HarnessOverlay.apply(rootfs, overlayDir));
+        } catch (Exception e) {
+            log("⚠ harness 覆盖层应用失败（继续使用上游 npm 包）: " + e);
+        }
+    }
+
     /** 执行完整安装流程。 */
     public void run() {
         try {
@@ -252,6 +269,12 @@ public final class BootstrapInstaller {
             } else {
                 log("dsh 已安装，跳过");
             }
+
+            // 5a. 用本仓库构建的补丁包覆盖 npm 装好的同名包：容器里的 dsh 来自
+            // npm 上游发行版，本仓库对 harness 的修复（如 dsh-fs-local 的
+            // createIfAbsent 无硬链接降级）只能靠覆盖带进容器。失败不阻断安装：
+            // 宁可继续用上游包，也不能让整个安装流程失败。
+            applyHarnessOverlay(rootfs);
 
             // 5b. 校验 node-pty 原生模块。npm 装 dsh 时 node-pty 要 node-gyp 现场编译，
             // 编译失败（常见原因：nodejs.org 头文件下载被墙）会被当 optional 依赖

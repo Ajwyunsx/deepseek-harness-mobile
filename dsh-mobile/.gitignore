@@ -9,3 +9,7 @@ local.properties
 .idea/
 *.iml
 .cxx/
+
+# harness 覆盖层里随包发布的 lib/ 是"待覆盖到容器"的发布产物，必须入库；
+# 根 .gitignore 的 `lib/` 会把它当构建输出忽略掉（那样 CI 构建的 APK 就没有补丁代码）。
+!app/src/main/assets/harness-overlay/**

@@ -1,0 +1,6 @@
+# harness overlay manifest: package	version	path	sha256
+@deepseek-ai/dsh-fs-local	0.1.7-rc.2	lib/index.js	d6a2a059b2a40aa7e8a24e2f2d1ff9352f44d311b7329d532640c46994fde425
+@deepseek-ai/dsh-fs-local	0.1.7-rc.2	lib/types/fsio.d.ts	0c902e085f62bd97d6301a64938942452ade124b938d7f159930935d3444a9f6
+@deepseek-ai/dsh-fs-local	0.1.7-rc.2	lib/types/index.d.ts	d4ceee0ecf2345787ff52bff8287ebc32abac49d163b13235b5e0c244547282c
+@deepseek-ai/dsh-fs-local	0.1.7-rc.2	lib/types/win32.d.ts	d64a7a5ff9a043fb33f2b761fa71330ec834d5b6f02bab97cd68a7e0dfc7fcf4
+@deepseek-ai/dsh-fs-local	0.1.7-rc.2	package.json	46aac3345be7319f80b4e07af23f4111e1183ad71cb5e06497a76810e7e1a8b5
