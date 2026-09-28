@@ -30,15 +30,13 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* 装饰性 heroGlow svg 比视口宽，裁掉溢出。
-   同样不能用 div[class*="_root"] 全局匹配（会波及所有组件根） */
+/* 溢出裁剪不能用 div[class*="_root"] 全局匹配（会波及所有组件根） */
 #root > div[class*="_root"],
 div[class*="_frame"],
 div[class*="_centerCol"] {
   overflow-x: clip;
 }
 
-svg[class*="_heroGlow"],
 img, video, canvas {
   max-width: 100vw;
 }
@@ -342,8 +340,7 @@ div[class*="_trigger"] {
   div[class*="_viewArea"] {
     min-height: 0 !important;
   }
-  div[class*="_headline"],
-  div[class*="_headlineText"] {
+  div[class*="_headline"] {
     font-size: clamp(28px, 8vw, 40px) !important;
     line-height: 1.15 !important;
   }

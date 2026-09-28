@@ -5,6 +5,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-compaction-image-offload/projection'
 import z from '@deepseek-ai/schemastery'
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm'
 import type { LlmImageRequestPricing, LlmRuntime, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -249,6 +250,18 @@ export class TokenMeter extends Service {
     let nextAnchor = state.anchor
 
     switch (event.type) {
+      case 'image/offload': {
+        const offloaded = new Map(event.data.targets.map(target => [target.seq, new Set(target.imageIndexes)]))
+        state.surface = state.surface.map((node) => {
+          const indexes = offloaded.get(node.seq)
+          if (indexes === undefined) return node
+          return {
+            ...node,
+            images: node.images.map((image, index) => (indexes.has(index) ? { ...image, offloaded: true as const } : image)),
+          }
+        })
+        break
+      }
       case 'request/header':
         nextHeader = canonicalHeader(event.data.header)
         break
