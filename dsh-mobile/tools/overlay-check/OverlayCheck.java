@@ -18,6 +18,8 @@ public final class OverlayCheck {
     public static void main(String[] args) {
         File rootfs = new File(args[0]);
         File overlay = new File(args[1]);
+        System.out.println("TARGET_VERSION=" + HarnessOverlay.targetVersion(overlay));
+        System.out.println("INSTALLED_HARNESS=" + HarnessOverlay.installedHarnessVersion(rootfs));
         System.out.println("NEEDS_BEFORE=" + HarnessOverlay.needsApply(rootfs, overlay));
         System.out.println("SUMMARY_BEGIN");
         System.out.println(HarnessOverlay.apply(rootfs, overlay));

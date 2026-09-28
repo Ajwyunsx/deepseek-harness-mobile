@@ -77,20 +77,84 @@ public final class BootstrapInstaller {
     }
 
     /**
-     * 展开 assets 里随 APK 携带的 harness 覆盖层，覆盖容器内 npm 装好的同名包。
+     * 展开 assets 里随 APK 携带的 harness 覆盖层，返回展开目录。
+     *
+     * <p>展开失败时返回一个空目录：覆盖逻辑读到空清单会整体跳过，安装流程继续。
+     *
+     * @return 展开后的覆盖层目录
+     */
+    private File extractHarnessOverlay() {
+        File destination = new File(ctx.getCacheDir(), "harness-overlay");
+        try {
+            return HarnessOverlayAssets.extract(ctx, destination);
+        } catch (Exception e) {
+            log("⚠ harness 覆盖层资产展开失败（本次不做覆盖）: " + e);
+            return destination;
+        }
+    }
+
+    /**
+     * 用覆盖层覆盖容器内 npm 装好的同名包。
      *
      * <p>只打日志不抛异常：覆盖失败时容器继续用上游包（行为与不装补丁一致），
      * 不能让一个可选步骤失败掉整个安装。版本不匹配的包会被 HarnessOverlay 跳过。
      *
-     * @param rootfs 容器 rootfs 根目录
+     * @param rootfs    容器 rootfs 根目录
+     * @param overlayDir 已展开的覆盖层目录
      */
-    private void applyHarnessOverlay(File rootfs) {
+    private void applyHarnessOverlay(File rootfs, File overlayDir) {
         try {
-            File overlayDir = HarnessOverlayAssets.extract(ctx, new File(ctx.getCacheDir(), "harness-overlay"));
             log(HarnessOverlay.apply(rootfs, overlayDir));
         } catch (Exception e) {
             log("⚠ harness 覆盖层应用失败（继续使用上游 npm 包）: " + e);
         }
+    }
+
+    /**
+     * 把容器内的 dsh 对齐到指定版本，版本一致时什么都不做。
+     *
+     * <p>供服务启动时的自愈使用：用户升级 APK 后，已有容器里装的仍是旧版 dsh，
+     * 而补丁包只对目标版本做过校验——这里就地把它装成目标版本，随后覆盖逻辑即可
+     * 正常生效，无需重装整个容器。需要联网（npm 装包），失败只写日志。
+     *
+     * @param ctx           上下文
+     * @param targetVersion 目标 dsh 版本；为 null 时直接返回 false
+     * @param logFile       追加写日志的文件
+     * @return 对齐后容器内版本与目标一致时为 true
+     */
+    public static boolean alignHarnessVersion(Context ctx, String targetVersion, File logFile) {
+        if (targetVersion == null) return false;
+        File rootfs = ProotRunner.rootfsDir(ctx);
+        if (targetVersion.equals(HarnessOverlay.installedHarnessVersion(rootfs))) return true;
+        appendLog(logFile, "[harness] 对齐 dsh 版本 → " + targetVersion);
+        BootstrapInstaller installer = new BootstrapInstaller(ctx, new Listener() {
+            @Override
+            public void onStage(String stage, int percent) {
+                appendLog(logFile, "[harness] " + stage);
+            }
+
+            @Override
+            public void onLog(String line) {
+                appendLog(logFile, "[harness] " + line);
+            }
+
+            @Override
+            public void onDone(boolean success, String error) {
+                appendLog(logFile, success ? "[harness] 对齐完成" : "[harness] 对齐失败: " + error);
+            }
+        });
+        try {
+            installer.runInContainer(Arrays.asList("/opt/node/bin/npm", "config", "set", "registry",
+                    installer.prefs.getNpmRegistry()), 0, 0);
+            installer.runInContainer(Arrays.asList("/opt/node/bin/npm", "install", "-g",
+                    "@deepseek-ai/dsh@" + targetVersion), 0, 0);
+        } catch (Exception e) {
+            appendLog(logFile, "[harness] 对齐失败（继续用容器内现有版本）: " + e);
+            return false;
+        }
+        String aligned = HarnessOverlay.installedHarnessVersion(rootfs);
+        appendLog(logFile, "[harness] 对齐后版本 " + aligned);
+        return targetVersion.equals(aligned);
     }
 
     /** 执行完整安装流程。 */
@@ -246,10 +310,22 @@ public final class BootstrapInstaller {
                 log("编译工具链已存在，跳过");
             }
 
-            // 5. 容器内安装 dsh
+            // 5. 容器内安装 dsh，并把版本对齐到补丁包声明的 harness 版本。
+            // 容器里跑的是 npm 上的上游发行版，补丁包（assets/harness-overlay）只对
+            // 同一版本的包做过校验，所以这里宁可显式装成那个版本，也不跟着 npm
+            // 的 latest 漂——版本不一致时覆盖会被整包跳过。
+            File overlayDir = extractHarnessOverlay();
+            String targetVersion = HarnessOverlay.targetVersion(overlayDir);
+            String spec = targetVersion == null ? "@deepseek-ai/dsh" : "@deepseek-ai/dsh@" + targetVersion;
             File dshBin = new File(rootfs, "opt/node/bin/dsh");
-            if (!dshBin.isFile()) {
-                stage("安装 DeepSeek Harness", 83);
+            String installedVersion = HarnessOverlay.installedHarnessVersion(rootfs);
+            if (!dshBin.isFile() || (targetVersion != null && !targetVersion.equals(installedVersion))) {
+                if (dshBin.isFile()) {
+                    stage("对齐 DeepSeek Harness 版本", 83);
+                    log("容器内 dsh " + installedVersion + " ≠ 补丁包目标 " + targetVersion + "，重装对齐");
+                } else {
+                    stage("安装 DeepSeek Harness", 83);
+                }
                 // 上次安装若被中断（杀进程/磁盘满），会留下半成品目录，
                 // npm 重命名时报 ENOTEMPTY 永远装不上——先清掉再装
                 File scopeDir = new File(rootfs, "opt/node/lib/node_modules/@deepseek-ai");
@@ -264,17 +340,16 @@ public final class BootstrapInstaller {
                 runInContainer(Arrays.asList("/opt/node/bin/npm", "config", "set", "registry",
                         prefs.getNpmRegistry()), 83, 85);
                 checkCancelled();
-                runInContainer(Arrays.asList("/opt/node/bin/npm", "install", "-g",
-                        "@deepseek-ai/dsh"), 85, 96);
+                runInContainer(Arrays.asList("/opt/node/bin/npm", "install", "-g", spec), 85, 96);
             } else {
-                log("dsh 已安装，跳过");
+                log("dsh 已安装且版本一致（" + installedVersion + "），跳过");
             }
 
             // 5a. 用本仓库构建的补丁包覆盖 npm 装好的同名包：容器里的 dsh 来自
             // npm 上游发行版，本仓库对 harness 的修复（如 dsh-fs-local 的
             // createIfAbsent 无硬链接降级）只能靠覆盖带进容器。失败不阻断安装：
             // 宁可继续用上游包，也不能让整个安装流程失败。
-            applyHarnessOverlay(rootfs);
+            applyHarnessOverlay(rootfs, overlayDir);
 
             // 5b. 校验 node-pty 原生模块。npm 装 dsh 时 node-pty 要 node-gyp 现场编译，
             // 编译失败（常见原因：nodejs.org 头文件下载被墙）会被当 optional 依赖

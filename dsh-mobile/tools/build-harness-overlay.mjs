@@ -160,11 +160,18 @@ async function main() {
     await rm(assetRoot, { recursive: true, force: true })
     await mkdir(assetRoot, { recursive: true })
 
+    // Every workspace package carries the repository version, so the root version
+    // is the harness version this overlay targets; the app pins its container
+    // install to it instead of tracking the registry's `latest`.
+    const harnessVersion = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version
     const rows = []
     let bytes = 0
-    const produced = [join(assetRoot, 'manifest.tsv')]
+    const produced = [join(assetRoot, 'manifest.tsv'), join(assetRoot, 'harness-version.txt')]
     for (const packageName of OVERLAY_PACKAGES) {
       const { version, extracted } = await packOne(packageName, scratch)
+      if (version !== harnessVersion) {
+        throw new Error(`${packageName}@${version} 与仓库版本 ${harnessVersion} 不一致：覆盖层只能针对同一版本发布`)
+      }
       const target = join(assetRoot, assetDirName(packageName))
       for (const shipped of SHIP) {
         await cp(join(extracted, shipped), join(target, shipped), { recursive: true })
@@ -185,8 +192,9 @@ async function main() {
       `# harness overlay manifest: package\tversion\tpath\tsha256\n${rows.join('\n')}\n`,
       'utf8',
     )
+    await writeFile(join(assetRoot, 'harness-version.txt'), `${harnessVersion}\n`, 'utf8')
     assertNotIgnored(produced)
-    console.log(`overlay manifest: ${String(rows.length)} entry(ies), ${String(bytes)} bytes`)
+    console.log(`overlay manifest: ${String(rows.length)} entry(ies), ${String(bytes)} bytes, harness ${harnessVersion}`)
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }

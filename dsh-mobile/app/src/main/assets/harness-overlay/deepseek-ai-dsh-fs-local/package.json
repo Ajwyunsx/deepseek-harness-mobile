@@ -27,8 +27,8 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-fs": "0.1.7-rc.2"
+    "@deepseek-ai/dsh-fs": "0.1.7-rc.2",
+    "@deepseek-ai/cordis": "~4.0.4"
   },
   "dependencies": {
     "chokidar": "^4.0.3",
@@ -36,8 +36,8 @@
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-fs": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.2",
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-llm": "0.1.7-rc.2"
+    "@deepseek-ai/dsh-fs": "0.1.7-rc.2"
   }
 }

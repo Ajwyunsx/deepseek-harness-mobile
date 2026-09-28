@@ -32,8 +32,16 @@ import java.util.regex.Pattern;
  */
 public final class HarnessOverlay {
 
-    /** 覆盖层清单文件名，由 dsh-mobile/tools/build-harness-overlay.mjs 生成。 */
+    /**
+     * 覆盖层清单文件名，由 dsh-mobile/tools/build-harness-overlay.mjs 生成。
+     */
     private static final String MANIFEST_NAME = "manifest.tsv";
+
+    /** 覆盖层目标 harness 版本，由同一个生成脚本写出。 */
+    private static final String VERSION_NAME = "harness-version.txt";
+
+    /** 容器内 CLI 包相对 rootfs 的路径，其版本即容器里跑的 harness 版本。 */
+    private static final String CLI_PACKAGE = "opt/node/lib/node_modules/@deepseek-ai/dsh";
 
     /**
      * 已安装包可能出现的两处位置。Node 从 CLI 包内部开始向上解析模块，因此
@@ -177,6 +185,36 @@ public final class HarnessOverlay {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 覆盖层针对的 harness 版本（APK 内资产声明的那个版本）。
+     *
+     * <p>容器里的 dsh 应当装成这个版本：覆盖层只对同版本的包做过校验，装别的版本
+     * 会被 {@link #apply} 整包跳过。
+     *
+     * @param overlayDir 已展开的覆盖层目录
+     * @return 版本号；资产缺失或读不出时返回 null（调用方退回"装 latest"的旧行为）
+     */
+    public static String targetVersion(File overlayDir) {
+        File file = new File(overlayDir, VERSION_NAME);
+        if (!file.isFile()) return null;
+        try {
+            String version = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8).trim();
+            return version.isEmpty() ? null : version;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * 容器内已安装的 harness 版本（CLI 包 package.json 的 version）。
+     *
+     * @param rootfsDir 容器 rootfs 根目录
+     * @return 版本号；容器里还没装 dsh 时返回 null
+     */
+    public static String installedHarnessVersion(File rootfsDir) {
+        return installedVersion(new File(rootfsDir, CLI_PACKAGE.replace('/', File.separatorChar)));
     }
 
     /** 读取覆盖层清单；没有清单（老版本资产）时返回空表。 */

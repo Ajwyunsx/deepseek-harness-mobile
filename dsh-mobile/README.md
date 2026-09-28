@@ -15,7 +15,7 @@
 - **浏览器 token 鉴权**：dsh 0.1.5 起 Web 入口带一次性 token（根路径无 token/无有效 cookie 直接 401）。手机版不用去抓 `dsh web` 的 stdout——会话 cookie 的签名密钥是持久化的，存在容器内 `/home/dsh/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 记录里；App 直接读该密钥、用相同算法（HMAC-SHA256）自签一枚按 `host:port` 绑定的 cookie（127.0.0.1 与 localhost 各一枚）写入 WebView，再加载干净根路径。加载前会先等「带 cookie 的根路径」返回 HTTP 200（最多 120s）才加载，避开容器/插件树装配期；抓不到密钥时回退实时捕获 `dsh web` 的带 token URL 做一次交换。`dsh web` 以 `--no-open` 启动，避免容器内无效的浏览器拉起
 - **容器 SSH**：openssh-server 随服务自启（仅监听 127.0.0.1:8022），本机终端/Termux 直接 `ssh dsh@127.0.0.1 -p 8022`（普通用户 dsh，登录 PATH 带 node/npm；root 同密码也可登），电脑走 `adb forward`；密码首次自动生成，设置页可查看/复制/改端口
 - **命令沙箱已禁用**：容器启动时钉死 `DSH_PERMISSION_MODE=danger-full-access`（proot 里 bwrap/Landlock 基本不可用，workspace-write 会报 SANDBOX_UNAVAILABLE）；dsh 的 bash/文件写入不设围栏、不逐条询问。会话里仍可手动切回 workspace-write/read-only，但沙箱 runner 不可用时受限命令会失败
-- **本仓库补丁包（harness overlay）**：容器里的 `@deepseek-ai/dsh` 是 npm 上的上游发行版，本仓库对 harness 源码的修复不会自己进容器。APK 因此携带 `assets/harness-overlay/`——由 `dsh-mobile/tools/build-harness-overlay.mjs` 从本仓库构建导出，含逐文件 sha256 清单。装完 dsh 后由 `HarnessOverlay` 用它覆盖同名包，服务每次启动前再核对一次内容哈希做自愈（一致则零写入）。覆盖前会核对已装版本，版本不匹配就整包跳过并写 `dsh-web.log`——宁可保留上游行为，也不装出错误组合。当前纳入的补丁：`@deepseek-ai/dsh-fs-local`（createIfAbsent 在无硬链接文件系统上的降级 + 发布后普通文件校验，见 issue #13）
+- **本仓库补丁包（harness overlay）**：容器里的 `@deepseek-ai/dsh` 是 npm 上的上游发行版，本仓库对 harness 源码的修复不会自己进容器。APK 因此携带 `assets/harness-overlay/`——由 `dsh-mobile/tools/build-harness-overlay.mjs` 从本仓库构建导出，含逐文件 sha256 清单与目标 harness 版本。安装流程按该版本装 dsh（`npm i -g @deepseek-ai/dsh@<版本>`，不再跟着 npm 的 latest 漂），装完由 `HarnessOverlay` 覆盖同名包；服务每次启动前核对内容哈希做自愈（一致则零写入），并在发现容器内 dsh 版本落后时自动对齐到目标版本（联网 npm 装包，每个服务进程只尝试一次）——所以升级 APK 后无需重装容器。覆盖前会核对已装版本，版本不匹配就整包跳过并写 `dsh-web.log`——宁可保留上游行为，也不装出错误组合。当前纳入的补丁：`@deepseek-ai/dsh-fs-local`（createIfAbsent 在无硬链接文件系统上的降级 + 发布后普通文件校验，见 issue #13）
 
 ## 使用
 
@@ -25,6 +25,7 @@
 4. 容器内访问宿主机文件：`/mnt/sd`（外置 SD）、`/mnt/shared`（共享存储 dsh-shared）；工作目录 `/home/dsh` 下的 `sd/` 与 `shared/` 是同样两个入口
 5. 划卡清任务后服务被杀是 OEM 行为：到 设置 → 后台保活 里把「忽略电池优化」加入白名单，并按引导开「自启动/允许后台活动」（荣耀/MagicOS 必须），可大幅降低被杀概率
 6. 注意：v1.0.7 起 dsh 的 HOME 从 /root 迁到 /home/dsh，升级后需重新填一次 API key
+7. 升级 APK 不需要重装容器：服务启动时会自动把容器内的 dsh 对齐到 APK 携带的补丁包目标版本（需要联网），并把本仓库的补丁包覆盖上去；进度与结果写在 `dsh-web.log`
 
 ## 构建
 

@@ -70,6 +70,13 @@ async function writeInstalledPackage(packageDir, version, marker) {
   await writeFile(join(packageDir, 'lib', 'index.js'), marker, 'utf8')
 }
 
+/** Write the container's CLI package, whose version is the installed harness version. */
+async function writeInstalledCli(rootfsDir, version) {
+  const cliDir = join(rootfsDir, 'opt', 'node', 'lib', 'node_modules', '@deepseek-ai', 'dsh')
+  await mkdir(cliDir, { recursive: true })
+  await writeFile(join(cliDir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh', version }, null, 2)}\n`, 'utf8')
+}
+
 /** Run the compiled overlay against a rootfs and return its stdout. */
 function runOverlay(classesDir, rootfsDir) {
   return run('java', ['-cp', classesDir, 'OverlayCheck', rootfsDir, overlayDir], { encoding: 'utf8' })
@@ -104,7 +111,10 @@ async function main() {
     const hoistedRootfs = join(scratch, 'hoisted-rootfs')
     const hoistedPackage = join(hoistedRootfs, 'opt', 'node', 'lib', 'node_modules', ...packageName.split('/'))
     await writeInstalledPackage(hoistedPackage, packageVersion, '// upstream placeholder\n')
+    await writeInstalledCli(hoistedRootfs, packageVersion)
     const hoistedOut = runOverlay(classesDir, hoistedRootfs)
+    check(hoistedOut.includes(`TARGET_VERSION=${packageVersion}`), '覆盖层声明的目标版本可读')
+    check(hoistedOut.includes(`INSTALLED_HARNESS=${packageVersion}`), '读到容器内已装 harness 版本')
     check(hoistedOut.includes('NEEDS_BEFORE=true'), '首次运行需要覆盖')
     check(hoistedOut.includes('NEEDS_AFTER=false'), '覆盖后无需再覆盖（幂等）')
     check(await sha256(join(hoistedPackage, 'lib', 'index.js')) === entry.sha256, 'lib/index.js 覆盖为清单哈希')
@@ -117,10 +127,19 @@ async function main() {
     const stalePackage = join(nestedRootfs, 'opt', 'node', 'lib', 'node_modules', ...packageName.split('/'))
     await writeInstalledPackage(nestedPackage, packageVersion, '// nested placeholder\n')
     await writeInstalledPackage(stalePackage, '0.1.0-not-ours', '// stale copy must stay\n')
+    await writeInstalledCli(nestedRootfs, '0.1.0-not-ours')
     const nestedOut = runOverlay(classesDir, nestedRootfs)
+    check(nestedOut.includes('INSTALLED_HARNESS=0.1.0-not-ours'), '读出不匹配的已装 harness 版本')
     check(nestedOut.includes('NEEDS_AFTER=false'), '嵌套副本被覆盖后一致')
     check(await sha256(join(nestedPackage, 'lib', 'index.js')) === entry.sha256, '嵌套副本被覆盖为清单哈希')
     check(await readFile(join(stalePackage, 'lib', 'index.js'), 'utf8') === '// stale copy must stay\n', '版本不符的陈旧副本未被改动')
+
+    console.log('\nscenario: container without a harness install')
+    const bareRootfs = join(scratch, 'bare-rootfs')
+    await mkdir(join(bareRootfs, 'opt', 'node', 'lib', 'node_modules'), { recursive: true })
+    const bareOut = runOverlay(classesDir, bareRootfs)
+    check(bareOut.includes('INSTALLED_HARNESS=null'), '未安装时版本读作 null')
+    check(bareOut.includes('NEEDS_BEFORE=false'), '未安装时不触发覆盖')
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
