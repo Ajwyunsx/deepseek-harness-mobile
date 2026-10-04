@@ -7,8 +7,8 @@
 - **内置 Ubuntu 容器**：proot 运行完整 Ubuntu 22.04 (aarch64) rootfs，首启联网下载（约 200MB：rootfs + Node.js + dsh），默认全部走国内镜像（rootfs/Node/Termux/apt 用中科大源，npm 用 npmmirror）
 - **干净工作目录**：dsh 的 HOME 与 cwd 是容器内独立的 `/home/dsh`（不用 /root，避免安装残留与 npm 缓存污染工作区选择器）
 - **SD 卡目录映射**：外置 SD 卡 bind 到容器 `/mnt/sd` 和工作目录内 `/home/dsh/sd`；`/sdcard/dsh-shared` 兜底映射到 `/mnt/shared` 与 `/home/dsh/shared`，打开工作区即可看到 sd/ shared/ 两个入口，方便传入/传出文件
-- **手机版界面**：注入的 `mobile.css` 强制 dsh Web UI 适配手机屏幕比例（弹窗不溢出、右栏/详情面板按内容三态门控——上游收起 `data-rightbar-collapsed` 时保持隐藏、轨迹事件详情面板整宽覆盖、触控目标加大、代码块横向滚动、设置弹窗单列化、消息页高度链锁死内部滚动、token/耗时统计条自动折行完整显示、悬浮提示气泡弹出 2.5 秒后自动消失）
-- **侧栏非常驻**：左侧 rail 默认隐藏，左上角悬浮按钮或屏幕左缘右滑呼出覆盖式抽屉，点遮罩、抽屉上左滑或选中会话自动收起
+- **手机版界面**：注入的 `mobile.css` 强制 dsh Web UI 适配手机屏幕比例（弹窗不溢出、右栏/详情面板按内容三态门控——上游收起 `data-rightbar-collapsed` 时保持隐藏、轨迹事件详情面板整宽覆盖、触控目标加大、代码块横向滚动、设置弹窗单列化、消息页高度链锁死内部滚动、token/耗时统计条自动折行完整显示、悬浮提示气泡弹出 2.5 秒后自动消失）。会话页输入座钉成固定浮层，消息流底部按座的实测高度动态留白（`inject.js` 往滚动容器末尾插间隔块，DOM 被 dsh 重建后重新量一次），对话末尾不会被输入框盖住
+- **侧栏非常驻**：左侧 rail 默认隐藏，左上角悬浮按钮或屏幕左缘右滑呼出覆盖式抽屉，点遮罩、抽屉上左滑或选中会话自动收起。开合各有 200ms 过渡：**收起时先把抽屉滑出屏幕、动画结束才真正收起 dsh 侧栏**——顺序反过来会让侧栏内容在仍可见的面板里先重排成图标栏，收起动画看起来是碎的
 - **DeepSeek 风格**：启动屏/安装向导/设置页均为 DeepSeek 品牌风格（品牌蓝 #4D6BFE、圆角卡片）
 - **前台服务保活**：容器由前台服务持有，通知栏可查看状态/停止；Web 服务先启动，SSH 的 openssh 安装/启动在后台线程异步进行（写独立的 `dsh-sshd.log`），不拖慢首次进界面
 - **插件自愈**：dsh 的插件加载失败会拖垮整个 `dsh web`（plugin tree failed to load）。服务检测到 `failed to import loader entry <id> (<pkg>)` 时，会把这个用户插件从 profile 的 `dsh.profile.bundles` 临时摘掉再重启，保证界面能起来；插件文件保留，之后用 `dsh plugin --profile web add <兼容版本>` 重装即会重新入列。设置页的「添加插件」支持绝对路径，可直接装共享目录里的本地 tarball（如 `/home/dsh/shared/dsh-cmdgo-provider-0.4.0.tgz`）

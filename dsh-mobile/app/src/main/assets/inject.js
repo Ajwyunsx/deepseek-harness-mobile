@@ -101,13 +101,36 @@
       if (!sidebarIsOpen() && attemptsLeft > 0 && Date.now() - lastCloseIntent > 900) openSidebar(attemptsLeft - 1);
     }, 700);
   }
-  // 仅在确认当前是展开态时才点 toggle 收起。
+  // 仅在确认当前是展开态时才点 toggle 收起。收起分两步：先把抽屉滑出屏幕
+  // （CSS 过渡），动画结束才点 dsh 的 toggle 真正收起侧栏。反过来做（先点
+  // toggle）会让 dsh 立刻把侧栏内容重排成图标栏、而面板还在屏幕上，用户看到的
+  // 就是"内容先塌成图标、面板再整块消失"的碎裂动画。
+  var DRAWER_ANIM_MS = 200;
+  var closing = false;
   function closeSidebar() {
     if (!sidebarIsOpen()) { updateSidebarDrawer(); return; }
     lastCloseIntent = Date.now();
-    var t = findSidebarToggle();
-    if (t) t.click();
-    setTimeout(updateSidebarDrawer, 300);
+    if (closing) return;
+    closing = true;
+    document.body.classList.add('dsh-mobile-drawer-closing');
+    var panel = document.querySelector('div[class*="_sidebarCol"]');
+    var settled = false;
+    var settle = function () {
+      if (settled) return;
+      settled = true;
+      if (panel) panel.removeEventListener('transitionend', settle);
+      var t = findSidebarToggle();
+      if (t) t.click();
+      // 等 dsh 的收起态落地后再撤退出态：此时它已收起，派生类一并去掉、面板切回
+      // display:none。提前撤会让面板又滑回屏幕，闪一下"内容已塌成图标"的面板。
+      setTimeout(function () {
+        closing = false;
+        document.body.classList.remove('dsh-mobile-drawer-closing');
+        updateSidebarDrawer();
+      }, 320);
+    };
+    if (panel) panel.addEventListener('transitionend', settle);
+    setTimeout(settle, DRAWER_ANIM_MS + 120);
   }
   // 在时间窗内持续强制收起：dsh 导航后会按持久化状态把侧栏重新展开，
   // 且展开可能发生在导航结束后 1~2 秒（真机更慢），点一次 toggle 可能白收。
@@ -156,6 +179,8 @@
       document.body.classList.remove('dsh-mobile-drawer');
       return;
     }
+    // 退出动画期间派生类由 closeSidebar 掌管，观察器不要抢先撤掉（否则面板瞬消失）
+    if (closing) return;
     var col = document.querySelector('div[class*="_sidebarCol"]');
     var open = false;
     if (col) {
@@ -163,8 +188,21 @@
       // dsh 收起时内层根节点带 _collapsed 类，以此为准。
       open = !col.querySelector('[class*="_collapsed"]');
     }
+    var wasOpen = document.body.classList.contains('dsh-mobile-drawer');
     document.body.classList.toggle('dsh-mobile-drawer', open);
-    if (open) ensureMask();
+    if (open) {
+      ensureMask();
+      // 滑入：同一帧带上"屏幕外"初态（此时该元素还没有过渡起点，不会先闪一下），
+      // 下一帧撤掉初态，CSS 过渡把面板推进来。
+      if (!wasOpen) {
+        document.body.classList.add('dsh-mobile-drawer-preopen');
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            document.body.classList.remove('dsh-mobile-drawer-preopen');
+          });
+        });
+      }
+    }
     if (window.innerWidth <= 700) ensureRailBtn();
   }
 
@@ -303,7 +341,6 @@
     return h;
   }
 
-  var lastPad = -1;
   var spacerEl = null;
   function fitComposerOverlap() {
     var comp = document.querySelector('div[class*="_centerCol"] div[class*="_composerSeat"]');
@@ -317,7 +354,6 @@
         pinnedStats.classList.remove('dsh-mobile-composer-stats');
         pinnedStats = null;
       }
-      lastPad = -1;
       return;
     }
     if (!spacerEl || !spacerEl.isConnected || spacerEl.parentElement !== sc) {
@@ -334,10 +370,12 @@
     // dsh 重渲染可能往 scrollBody 末尾插新节点（如座外统计条），
     // 间隔块必须保持最后一个孩子，否则新内容会落到间隔块下方被裁
     if (sc.lastElementChild !== spacerEl) sc.appendChild(spacerEl);
-    var statsH = pinComposerStats(comp);
+    var statsH = pinComposerStats(comp) || 0;
     var want = Math.max(48, Math.round(comp.getBoundingClientRect().height) + statsH + 16);
-    if (want !== lastPad) {
-      lastPad = want;
+    // 间隔块是新建元素时（React 重建过 scrollBody，或换了滚动容器）必须重新落
+    // 一次高度：只比较 want 与上一次的值会让新元素停在 height:auto(=0)，补偿静默
+    // 失效——表现就是对话末尾被固定输入座盖住。以元素自身的样式为准，不看缓存。
+    if (spacerEl.style.height !== want + 'px') {
       spacerEl.style.height = want + 'px';
       sc.style.scrollPaddingBottom = want + 'px';
     }

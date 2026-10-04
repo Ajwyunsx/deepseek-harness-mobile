@@ -667,6 +667,21 @@ div[class*="_trigger"] {
     /* overflow-y 非 visible 时 overflow-x 会跟着变成 auto——内部内容比抽屉宽时
        右缘图标（添加工作区等）被无声裁掉；改为 hidden 并约束内部宽度 */
     overflow-x: hidden !important;
+    /* 抽屉开合过渡（时长与 inject.js 的 DRAWER_ANIM_MS 一致）。收起由
+       closeSidebar 先滑出、动画结束才收起 dsh 侧栏本身，否则侧栏内容会在仍
+       看得见的面板里重排成图标栏，收起动画看起来是碎的 */
+    transition: transform 200ms ease-out !important;
+  }
+  body.dsh-mobile-drawer.dsh-mobile-drawer-preopen div[class*="_sidebarCol"],
+  body.dsh-mobile-drawer.dsh-mobile-drawer-closing div[class*="_sidebarCol"] {
+    transform: translateX(-100%) !important;
+  }
+  body.dsh-mobile-drawer #dsh-mobile-drawer-mask {
+    transition: opacity 200ms ease-out;
+  }
+  body.dsh-mobile-drawer.dsh-mobile-drawer-preopen #dsh-mobile-drawer-mask,
+  body.dsh-mobile-drawer.dsh-mobile-drawer-closing #dsh-mobile-drawer-mask {
+    opacity: 0;
   }
   body.dsh-mobile-drawer div[class*="_sidebarCol"] > *,
   body.dsh-mobile-drawer div[class*="_sidebarCol"] div[class*="_listArea"],
