@@ -146,6 +146,15 @@ jobs:
                - dsh-mobile/ 目录内的任何文件被合并改动时必须人工级别的复核说明原因。
 
             5. 验证：
+               - 先跑本仓库自带的三道门禁（都在 dsh-mobile/tools/，离线、无设备依赖）；
+                 任何一道非 0 退出都必须先修再提交：
+                   node dsh-mobile/tools/verify-tool-scripts.mjs      # 工具脚本语法
+                   node dsh-mobile/tools/verify-injected-selectors.mjs # 注入选择器是否仍命中新 DOM
+                   node dsh-mobile/tools/verify-mobile-ui.mjs          # 输入座留白 / 抽屉开合动画（真实资源 + Playwright）
+               - 若本次改动触及 packages/fs/fs-local：重跑
+                 node dsh-mobile/tools/build-harness-overlay.mjs 重新导出覆盖层，再跑
+                 node dsh-mobile/tools/verify-harness-overlay.mjs（有 WSL/Linux 环境时另跑
+                 dsh-mobile/tools/verify-nohardlink/verify.sh 验证真实文件系统行为）。
                - 在 `dsh-mobile` 目录执行 `./gradlew :app:assembleRelease`（x86_64 runner
                  不需要 aapt2 覆盖参数；JDK 17 用 runner 自带）。构建失败先修再提交。
 
