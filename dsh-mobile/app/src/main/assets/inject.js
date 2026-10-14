@@ -115,10 +115,17 @@
     document.body.classList.add('dsh-mobile-drawer-closing');
     var panel = document.querySelector('div[class*="_sidebarCol"]');
     var settled = false;
+    var startedAt = Date.now();
     var settle = function () {
       if (settled) return;
+      // 只认「真的滑完了」的那次过渡：面板从 display:none 切回来的同一帧、
+      // 或遮罩 opacity 的过渡事件都会在几毫秒内到达，提前点 toggle 就又变成
+      // 「内容先塌成图标、面板再消失」的碎裂动画（正好是 #15 的现象，且在慢
+      // 设备/首帧竞争下偶发）。所以要求：事件属于面板自身、属性是 transform、
+      // 且距开始至少半程。
+      if (Date.now() - startedAt < DRAWER_ANIM_MS * 0.5) return;
       settled = true;
-      if (panel) panel.removeEventListener('transitionend', settle);
+      if (panel) panel.removeEventListener('transitionend', onPanelTransitionEnd);
       var t = findSidebarToggle();
       if (t) t.click();
       // 等 dsh 的收起态落地后再撤退出态：此时它已收起，派生类一并去掉、面板切回
@@ -129,7 +136,13 @@
         updateSidebarDrawer();
       }, 320);
     };
-    if (panel) panel.addEventListener('transitionend', settle);
+    // 只看面板的 transform：别的目标/属性（遮罩 opacity、内部图标的过渡）冒泡
+    // 上来会把收起提前触发。
+    var onPanelTransitionEnd = function (ev) {
+      if (ev.target === panel && ev.propertyName === 'transform') settle();
+    };
+    if (panel) panel.addEventListener('transitionend', onPanelTransitionEnd);
+    // 兜底：过渡被取消 / 浏览器根本没发事件时，按动画时长自己收尾。
     setTimeout(settle, DRAWER_ANIM_MS + 120);
   }
   // 在时间窗内持续强制收起：dsh 导航后会按持久化状态把侧栏重新展开，
@@ -312,7 +325,11 @@
   var pinnedStats = null;
   function pinComposerStats(comp) {
     var bar = null;
-    var bars = document.querySelectorAll('div[class*="_centerCol"] .dsh-mobile-stats');
+    // 候选范围与座的选择器同源：优先稳定属性钩子，类名片段兜底。
+    var scope = comp.closest('[data-conversation-scroll]')
+      || comp.closest('div[class*="_centerCol"]')
+      || document;
+    var bars = scope.querySelectorAll('.dsh-mobile-stats');
     for (var i = 0; i < bars.length; i++) {
       var b = bars[i];
       if (comp.contains(b)) continue;
@@ -342,10 +359,28 @@
   }
 
   var spacerEl = null;
+  // 输入座钉成 fixed 后消息流的补偿测量。
+  //
+  // **选择器**：优先用上游给的稳定 `data-*` 钩子（`data-composer-seat` /
+  // `data-conversation-scroll`），类名片段只作兜底——`_centerCol` / `_composerSeat`
+  // 这类 `[class*="_xxx"]` 片段随构建哈希走，上游一年改三次 DOM 结构时最先失效，
+  // 而失效的表现是**补偿静默归零**：消息流末尾停在固定输入座下面（#14/#16 的现象）。
+  // updateDetailsCol 早就因为同样的理由改成了属性优先（见上方注释）。
+  function composerSeatEl() {
+    return document.querySelector('[data-composer-seat]')
+      || document.querySelector('div[class*="_centerCol"] div[class*="_composerSeat"]');
+  }
+  function scrollBodyEl(seat) {
+    return document.querySelector('[data-conversation-scroll]')
+      || (seat && seat.parentElement && seat.parentElement.className &&
+        String(seat.parentElement.className).indexOf('_scrollBody') >= 0 ? seat.parentElement : null)
+      || document.querySelector('div[class*="_centerCol"] [class*="_scrollBody"]');
+  }
   function fitComposerOverlap() {
-    var comp = document.querySelector('div[class*="_centerCol"] div[class*="_composerSeat"]');
-    var sc = document.querySelector('div[class*="_centerCol"] [class*="_scrollBody"]');
-    if (!comp || !sc) return;
+    var comp = composerSeatEl();
+    if (!comp) return;
+    var sc = scrollBodyEl(comp);
+    if (!sc) return;
     // 新对话 hero 页的座留在文档流里（不贴底），不需要补偿；
     // 从会话页导航过来时清掉旧间隔块/统计条钉住。
     if (comp.querySelector('div[class*="_composerHero"]')) {

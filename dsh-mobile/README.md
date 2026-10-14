@@ -38,6 +38,22 @@
 
 注意：aarch64 Linux 主机（Google 只发布 x86_64 aapt2）需要 box64，构建时传 `./gradlew -Pandroid.aapt2FromMavenOverride=$PWD/tools/aapt2`（包装脚本会从 `ANDROID_HOME` 或 `local.properties` 的 sdk.dir 找 SDK）；x86_64 主机与 CI 直接构建即可。JDK 17+ 用环境默认（如需指定请自行在 gradle.properties 加 `org.gradle.java.home`）。签名配置在 `app/build.gradle.kts`（自带调试级 keystore，正式发布请更换）。
 
+## 门禁（改接口层或合并上游后都要跑）
+
+三道都在 `dsh-mobile/tools/`，离线、不依赖设备：
+
+```bash
+node dsh-mobile/tools/verify-tool-scripts.mjs       # 工具脚本语法
+node dsh-mobile/tools/verify-injected-selectors.mjs # 注入选择器是否仍命中新 DOM
+node dsh-mobile/tools/verify-mobile-ui.mjs          # 输入座留白 / 抽屉开合动画（真实资源 + Playwright）
+```
+
+`verify-mobile-ui.mjs` 用 Playwright 加载**真实**的 `mobile.css`/`inject.js`，需要一份浏览器：
+`DSH_VERIFY_BROWSER=<可执行文件路径>` 指定；在 proot 容器里以 root 跑 chromium 会被
+SIGTRAP 掉（`Trace/breakpoint trap`），换成 `su nobody -c …` 之类的非 root 用户可解。
+它覆盖三组行为：容器重建后间隔块仍补偿输入座（#14）、**冷启动落在隐藏的 0 高输入座上时
+间隔块要能自愈且消息流保持贴底**（#16）、抽屉退出有过渡且 dsh 收起只发生在面板离屏之后（#15）。
+
 改了被覆盖的 harness 包（`dsh-mobile/tools/build-harness-overlay.mjs` 里的 `OVERLAY_PACKAGES`）之后，先 `pnpm run build:lib:host`，再 `node dsh-mobile/tools/build-harness-overlay.mjs` 重新导出 `app/src/main/assets/harness-overlay/`；再 `node dsh-mobile/tools/verify-harness-overlay.mjs`（需要 PATH 上有 `javac`）验证覆盖逻辑与资产哈希。
 
 ## 结构
