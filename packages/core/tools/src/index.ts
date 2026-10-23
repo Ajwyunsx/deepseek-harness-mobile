@@ -59,10 +59,10 @@ declare module '@deepseek-ai/dsh-llm' {
  */
 const PTC_ONLY_INSTRUCTION = `\`${RUN_CODE_NAME}\` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.`
 
-const SDK_RENDERERS: Record<string, (schemas: ToolSdkSchema[]) => string> = {
+const SDK_RENDERERS: Record<string, (schemas: ToolSdkSchema[], programFormat: 'function-body' | 'repl') => string> = {
   typescript: renderToolsSdk,
   python: renderToolsSdkPy,
-} satisfies Record<PtcSdkLanguage, (schemas: ToolSdkSchema[]) => string>
+} satisfies Record<PtcSdkLanguage, (schemas: ToolSdkSchema[], programFormat: 'function-body' | 'repl') => string>
 
 export {
   defineTool,
@@ -842,12 +842,14 @@ export class ToolRuntime extends Service {
    * Reserved presentation transport, kept outside the filterable registration
    * layers. Built on first need rather than at construction: which agents run
    * a PTC mode is no longer known when the service is constructed, and the
-   * transport is stateless beyond its closures over `this`.
+   * transport owns its PTC call tracking and state-owner registrations.
    */
   private ptcTransport: ToolDefinition | undefined
+  private readonly ptcContext: Context
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'tools')
+    this.ptcContext = ctx
     // The schema already defaulted an omitted mode; the ?? narrows the
     // optional-input type for direct (non-Loader) construction in tests.
     this.defaultMode = config.mode ?? 'native'
@@ -909,7 +911,7 @@ export class ToolRuntime extends Service {
         const render = SDK_RENDERERS[runtime.language]
         /* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
         if (render === undefined) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`)
-        return render(this.sdkSchemas(context.scope))
+        return render(this.sdkSchemas(context.scope), runtime.programFormat)
       },
     }
   }
@@ -965,7 +967,7 @@ export class ToolRuntime extends Service {
       peekRuntime: () => this.ctx.get('ptcRuntime'),
       maxParallel: this.maxParallelSubCalls,
       shapeDispatchLog: dispatch => this.shapeDispatchLog(dispatch),
-    })
+    }, this.ptcContext)
     return this.ptcTransport
   }
 

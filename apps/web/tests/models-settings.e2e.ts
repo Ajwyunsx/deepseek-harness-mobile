@@ -6,10 +6,11 @@
 // while the settings document records only that reference. Each saved row
 // appears after route topology invalidation without presenting liveness as
 // provider status. The customized-settings fold writes its curated fields —
-// the endpoint, and a declared route's own name and protocol — as merge
-// patches against the stored profile. Zero model calls: configuration is pure
-// settings/credentials/llm-domain traffic, so there is no fixture and a
-// stray stream would fail loud because the adapter registry is empty. The provider under test is
+// the endpoint, a declared route's own name and protocol, and the reasoning
+// levels of its models — as merge patches against the stored profile. Zero
+// model calls: configuration is pure settings/credentials/llm-domain traffic,
+// so there is no fixture and a stray stream would fail loud because the
+// adapter registry is empty. The provider under test is
 // minimax-cn so a developer's real ANTHROPIC/OPENAI environment keys can
 // never shadow the derived reference. The deletion dialog distinguishes a
 // reference-free profile from a page-managed key before the credential and
@@ -20,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page, Request, Route } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vitest'
 import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
   launchWebScaffold, watchConsole, webSnapshotMode, type WebScaffold,
@@ -29,6 +30,7 @@ import { openSettings, ZH_BROWSER_LOCALE, saveFailureShot } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('./expected/models-settings', import.meta.url))
 const EMPTY_EXPECTED = join(SNAPSHOT_DIR, 'empty.expected.md')
+const NATIVE_KEYLESS_EXPECTED = join(SNAPSHOT_DIR, 'native-keyless.expected.md')
 const CONFIGURED_EXPECTED = join(SNAPSHOT_DIR, 'configured.expected.md')
 const DECLARED_EXPECTED = join(SNAPSHOT_DIR, 'declared.expected.md')
 const DECLARED_EDIT_EXPECTED = join(SNAPSHOT_DIR, 'declared-edit.expected.md')
@@ -44,6 +46,7 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
   let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'models-settings-test-key')
     scaffold = await launchWebScaffold({})
     browser = await chromium.launch()
     // The scenario asserts the shipped Chinese copy, so the browser asks for it.
@@ -80,6 +83,7 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
   }, 120_000)
 
   afterAll(async () => {
+    vi.unstubAllEnvs()
     await browser?.close()
     await scaffold?.close()
   })
@@ -120,6 +124,12 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     const options = await pick.locator('option').allTextContents()
     expect(options).toContain('anthropic')
     expect(options).toContain('minimax-cn')
+    await pick.selectOption('openai-codex')
+    await expect.poll(async () => dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).count(), { timeout: 10_000 }).toBe(0)
+    expect(await dialog.getByRole('button', { name: '认证说明', exact: true }).count()).toBe(0)
+    expect(await dialog.textContent()).not.toMatch(/oauth/i)
+    const nativeSnapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(NATIVE_KEYLESS_EXPECTED, nativeSnapshot, MODE)
     await pick.selectOption('minimax-cn')
     await dialog.getByRole('textbox', { name: 'API 密钥', exact: true }).waitFor({ timeout: 10_000 })
     const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
@@ -136,6 +146,11 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     // turn with a ByteString TypeError; the form names the offending field
     // instead.
     await key.fill('sk-\u{1F600}minimax')
+    expect(await key.getAttribute('type')).toBe('password')
+    await dialog.getByRole('button', { name: '显示密钥', exact: true }).click()
+    expect(await key.getAttribute('type')).toBe('text')
+    await dialog.getByRole('button', { name: '隐藏密钥', exact: true }).click()
+    expect(await key.getAttribute('type')).toBe('password')
     await dialog.getByText('该 API 密钥格式错误，请检查。').waitFor({ timeout: 10_000 })
     await expect.poll(async () => save.isEnabled(), { timeout: 10_000 }).toBe(false)
 
@@ -206,6 +221,9 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-models-customized'))
     const dialog = page.getByRole('dialog', { name: '设置' })
     await dialog.getByRole('button', { name: '编辑 minimax-cn' }).click()
+    await dialog.getByPlaceholder('留空使用已保存凭据', { exact: true }).waitFor({ timeout: 10_000 })
+    expect(await dialog.textContent()).not.toContain('API 密钥来源：')
+    expect(await dialog.textContent()).not.toMatch(/oauth/i)
     await dialog.getByText('自定义设置').click()
     const url = dialog.getByLabel('API 地址')
     await url.waitFor({ timeout: 10_000 })
@@ -283,23 +301,29 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     await custom.getByLabel('Provider ID').fill('acme-gateway')
     await custom.getByLabel('显示名称').fill('Acme Gateway')
     await custom.getByLabel('API 地址').fill('https://gateway.acme.example/v1')
-    // No reasoning effort on a provider card at all: effort is a per-model
-    // capability, the models under one provider disagree about it, and a
-    // switch in the composer already records provider+model+effort together.
+    // No provider-scoped reasoning control: effort is a per-model capability
+    // and the models under one provider disagree about it, so each model row
+    // declares its own levels instead.
     expect(await dialog.getByLabel('推理强度').count()).toBe(0)
     await custom.getByRole('button', { name: '添加模型', exact: true }).click()
     await custom.getByLabel('模型 ID 1').fill('acme-large')
     await custom.getByRole('button', { name: '模型选项 1' }).click()
     expect(await custom.getByRole('group', { name: '输入类型 1' }).getByRole('checkbox', { name: '图片' }).isChecked()).toBe(false)
     await custom.getByRole('group', { name: '输入类型 1' }).getByRole('checkbox', { name: '图片' }).check()
+    // The switch seeds off, low, medium, and high rows; this route serves no medium.
+    const reasoning = custom.getByRole('group', { name: '推理等级 1' })
+    await reasoning.getByRole('switch', { name: '推理等级 1' }).click()
+    await reasoning.getByRole('button', { name: '删除档位 medium', exact: true }).click()
     await custom.getByRole('button', { name: '创建提供商', exact: true }).click()
 
     const row = dialog.getByText('Acme Gateway', { exact: true }).first()
     await row.waitFor({ timeout: 10_000 })
     const document = await readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8')
     expect(document).toContain('acme-gateway:')
+    expect(document).toContain('reasoningEfforts:')
     await expect(scaffold.ctx.llm.resolveModelInfo('acme-gateway', 'acme-large')).resolves.toMatchObject({
       inputModalities: ['text', 'image'],
+      reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
     })
 
     // The tag follows the adapter's installed catalog: this route is in no
@@ -328,6 +352,11 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     expect(await name.inputValue()).toBe('Acme Gateway')
     await dialog.getByRole('button', { name: '模型选项 1' }).click()
     expect(await dialog.getByRole('group', { name: '输入类型 1' }).getByRole('checkbox', { name: '图片' }).isChecked()).toBe(true)
+    // The stored levels come back as rows beside the values they send.
+    const reasoning = dialog.getByRole('group', { name: '推理等级 1' })
+    expect(await reasoning.getByRole('combobox').evaluateAll(selects => selects.map(select => (select as HTMLSelectElement).value)))
+      .toEqual(['off', 'low', 'high'])
+    expect(await reasoning.getByLabel('high API 参数值').inputValue()).toBe('high')
     await assertModelInputLayout(page, dialog)
     const snapshot = await captureStableAria(page, '[role="dialog"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(DECLARED_EDIT_EXPECTED, snapshot, MODE)
@@ -335,6 +364,8 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     await protocol.selectOption('anthropic-messages')
     await name.fill('Acme 网关')
     await dialog.getByRole('group', { name: '输入类型 1' }).getByRole('checkbox', { name: '图片' }).uncheck()
+    // A gateway with its own spelling for the top level.
+    await reasoning.getByLabel('high API 参数值').fill('deep')
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
     await expect.poll(async () => dialog.getByLabel('API 协议').count(), { timeout: 10_000 }).toBe(0)
     // The adapter re-resolved the route under the new protocol and re-registered
@@ -348,8 +379,11 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     const document = await readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8')
     expect(document).toContain('api: anthropic-messages')
     expect(document).toContain('displayName: Acme 网关')
+    expect(document).toContain('high: deep')
+    // The level keeps its id and name; only its wire spelling changed.
     await expect(scaffold.ctx.llm.resolveModelInfo('acme-gateway', 'acme-large')).resolves.toMatchObject({
       inputModalities: ['text'],
+      reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high', name: 'High' }] },
     })
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
@@ -535,7 +569,7 @@ describe('web e2e: Models settings page configures a dormant provider', () => {
     await assertFixtureInventory(SNAPSHOT_DIR, [
       'configured.expected.md', 'declared-edit.expected.md', 'declared.expected.md',
       'delete.expected.md', 'empty.expected.md', 'model-picker.expected.md',
-      'native-delete.expected.md', 'catalog-inputs.expected.md',
+      'native-delete.expected.md', 'native-keyless.expected.md', 'catalog-inputs.expected.md',
       'refreshing.expected.md', 'image-only.expected.md',
     ])
   })

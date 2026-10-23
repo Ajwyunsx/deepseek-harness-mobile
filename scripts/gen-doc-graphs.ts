@@ -147,6 +147,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Shares profile package operations with the CLI and reports persisted and running state to Web and agent callers.',
   },
   {
+    key: 'pluginMarket',
+    pkg: 'plugin-market',
+    title: 'Plugin market index reader',
+    mode: 'core',
+    consumers: ['client-ui-plugin-market', 'plugin-market'],
+    note: 'Fetches and validates the index sources the user configures; installation goes through the plugin manager.',
+  },
+  {
     key: 'profileContext',
     pkg: 'app-boot',
     title: 'Launcher-owned profile data',
@@ -369,6 +377,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Typert Host invocation gateway',
     mode: 'core',
     note: 'Associates generated Remote descriptors with live Cordis services, resolves registered identities, and exposes unary calls through the shared Connection RPC carrier.',
+  },
+  {
+    key: 'remoteAccess',
+    pkg: 'api-remote-access',
+    title: 'Remote method access control',
+    mode: 'core',
+    consumers: ['api-gateway', 'api-session-controller', 'api-workspace-controller'],
+    note: 'Decides which Remote methods a non-owner Peer may call through business-registered role-based policies, filters list results, and streams each Peer access snapshot.',
   },
   {
     key: 'sessionPersistence',
@@ -802,7 +818,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'web',
     title: 'Web access provider registry',
     mode: 'seam',
-    implementations: ['web-search-exa', 'web-search-perplexity', 'web-search-deepseek', 'web-fetch-http'],
+    implementations: ['web-search-exa', 'web-search-perplexity', 'web-search-deepseek', 'web-deepseek-api', 'web-fetch-http'],
     consumers: ['tool-web'],
     note: 'Search and fetch providers register into one ctx.web seam; tool-web owns the stable model-facing names.',
   },
@@ -831,6 +847,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['client-connection', 'client-modules', 'client-hmr'],
     note: 'Plain node:http carrier: named-route registry, index transform taps, and the static dist fallback; web-transport plugins register their own routes.',
+  },
+  {
+    key: 'webApp',
+    pkg: 'web-app',
+    title: 'Served Web GUI',
+    mode: 'core',
+    consumers: ['harness-dev-context'],
+    note: 'The web-runtime row advertises one URL for its Web GUI: the configured publicUrl, otherwise the listener origin; DSH_WEB_URL, the startup URL, and harness-dev-context read the same value.',
   },
   {
     key: 'clientModules',
@@ -1750,8 +1774,66 @@ function renderIndex(docs: GraphDoc[]): string {
   ].join('\n')
 }
 
+function memoize<A extends readonly unknown[], R>(
+  compute: (...args: A) => R,
+  key: (...args: A) => string,
+  copy: (value: R) => R,
+): (...args: A) => R {
+  const results = new Map<string, R>()
+  return (...args) => {
+    const id = key(...args)
+    const recorded = results.get(id)
+    if (recorded !== undefined) return copy(recorded)
+    const value = compute(...args)
+    results.set(id, value)
+    return copy(value)
+  }
+}
+
+/**
+ * Run read-only analysis with memoized TypeScript filesystem probes.
+ *
+ * While `run` executes, `fileExists`, `directoryExists`, `realpath`, `readDirectory`,
+ * and `getDirectories` on `system` return the first result recorded for each distinct
+ * argument list, so every compiler host and config parse built on it, including the
+ * Typert programs and the event-relation Program, shares one view of the filesystem.
+ * The workspace must not change while `run` executes. A probe that throws records
+ * nothing, and array results are copied for each caller. The original methods are
+ * restored when `run` returns or throws. The memo patches `system` itself, so `run`
+ * must be synchronous and must not call this function again.
+ * @param run - read-only analysis that runs under the memo.
+ * @param system - TypeScript system whose probes are memoized.
+ * @returns the value returned by `run`.
+ */
+export function withMemoizedFileSystemProbes<T>(run: () => T, system: ts.System = ts.sys): T {
+  const probes = ['fileExists', 'directoryExists', 'realpath', 'readDirectory', 'getDirectories'] as const
+  const descriptors = probes.map(name => [name, Object.getOwnPropertyDescriptor(system, name)] as const)
+  const original: ts.System = { ...system }
+  const same = <V>(value: V): V => value
+  const copied = (value: string[]): string[] => [...value]
+  system.fileExists = memoize((path: string) => original.fileExists(path), path => path, same)
+  system.directoryExists = memoize((path: string) => original.directoryExists(path), path => path, same)
+  if (original.realpath !== undefined) system.realpath = memoize(original.realpath.bind(original), path => path, same)
+  system.readDirectory = memoize(
+    (path: string, extensions?: readonly string[], exclude?: readonly string[], include?: readonly string[], depth?: number) =>
+      original.readDirectory(path, extensions, exclude, include, depth),
+    (path, extensions, exclude, include, depth) => JSON.stringify([path, extensions, exclude, include, depth]),
+    copied,
+  )
+  system.getDirectories = memoize((path: string) => original.getDirectories(path), path => path, copied)
+  try {
+    return run()
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor === undefined) Reflect.deleteProperty(system, name)
+      else Object.defineProperty(system, name, descriptor)
+    }
+  }
+}
+
 function main(): void {
-  const docs = renderDocs()
+  // renderDocs reads the workspace only; generated pages are written after the memo is removed.
+  const docs = withMemoizedFileSystemProbes(renderDocs)
   if (process.argv.includes('--check')) {
     const stale: string[] = []
     for (const doc of docs) {

@@ -104,7 +104,7 @@ export function apply(ctx) {
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/desktop-smoke-office-cli',
     async handler(_request, response) {
       try {
-        const skill = await ctx.skills.get('office-docx')
+        const skill = await ctx.skills.get('office-export-pdf')
         const json = skill?.content.match(/\\n(\\{\\n[\\s\\S]+)$/u)?.[1]
         if (json === undefined) throw new Error('Office skill did not supply CLI paths')
         const { libreofficeKit: { node, cli } } = JSON.parse(json)

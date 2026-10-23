@@ -7,7 +7,7 @@
 
 import { existsSync, globSync, readFileSync } from 'node:fs'
 import { relative, resolve, sep } from 'node:path'
-import { markdownHeadingLines, markdownProseLines, type MarkdownProseLine } from './markdown.ts'
+import { markdownHeadingLines, markdownProseLines, parseMarkdown, type MarkdownProseLine } from './markdown.ts'
 
 const root = resolve(import.meta.dirname, '..')
 const HEADING = '## Model Experience'
@@ -52,6 +52,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/experimental/api-speech-to-text': { kind: 'none', reason: 'Transports audio and preparation state; ordinary user submission owns model-visible text.' },
   'packages/experimental/speech-to-text-sensevoice': { kind: 'none', reason: 'Local recognition returns transient text without modifying model context.' },
   'packages/experimental/client-ui-voice-input': { kind: 'none', reason: 'Inserts reviewable text into the unsent draft without submitting to the Agent.' },
+  'packages/experimental/plugin-market-bundle': { kind: 'indirect', reason: 'Mounts the pluginMarket service, which lets the Creator preset register the plugin_market tool documented in packages/boot/plugin-market.' },
   'packages/experimental/voice-input-bundle': { kind: 'none', reason: 'Composes dictation and preparation plugins without adding any model-facing contribution.' },
   'packages/telemetry/otel': { kind: 'none', reason: 'The service delivers caller-selected records without changing model context.' },
   'packages/host/product-telemetry-otel': { kind: 'none', reason: 'The plugin exports explicit analytics records without contributing model context.' },
@@ -91,6 +92,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/util/chunked-list': { kind: 'none', reason: 'Immutable collection primitive; registers nothing model-facing.' },
   'packages/util/package-manifest': { kind: 'none', reason: 'Type declarations only; registers nothing model-facing.' },
   'packages/util/lazy-require': { kind: 'none', reason: 'Host module-loading primitive; registers nothing model-facing.' },
+  'packages/util/plugin-market-index': { kind: 'indirect', reason: 'Pure index validation; the plugin_market tool owns the entries it returns to the model.' },
   'packages/util/time': { kind: 'indirect', reason: 'Pure zone validation; the consumer that records a canonical zone owns the model-visible line derived from it.' },
   'packages/core/agent-default-model': { kind: 'indirect', reason: 'The service supplies a ModelSelection; request assembly and adapters own the model-visible request.' },
   'packages/llm/deepseek-llm-api-extensions': { kind: 'indirect', reason: 'The registry contributes model-hidden provider fields; dsh-llm-deepseek owns their wire placement.' },
@@ -115,6 +117,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/client/connection': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/file-upload': { kind: 'none', reason: 'Browser-side request-body transport; registers nothing model-facing.' },
   'packages/api/remotes': { kind: 'none', reason: 'The Remote BFF selects business methods and forwarded events; selected services own any model-visible effect.' },
+  'packages/api/remote-access': { kind: 'none', reason: 'Remote access decisions for Client callers; registers nothing model-facing.' },
   'packages/experimental/client-ui-agent-team': { kind: 'none', reason: 'The browser projection and task controls register no model-facing input.' },
   'packages/experimental/client-ui-claude-code-mods': { kind: 'none', reason: 'The browser draws Host-held mod trees and relays clicks; the mods\' own hooks own any model-visible effect.' },
   'packages/client/shortcuts': { kind: 'none', reason: 'Browser keyboard routing; registers nothing model-facing.' },
@@ -135,6 +138,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/client/ui-reference': { kind: 'indirect', reason: 'Browser-side reference selection delegates file guidance and session snapshot preparation to Host-owned providers.' },
   'packages/client/ui-commands': { kind: 'indirect', reason: 'The dispatch paths trigger the host command.execute RPC; each command handler\'s host package owns any model-visible effect.' },
   'packages/client/ui-model-selection': { kind: 'indirect', reason: 'Selection routes session.selectModel; the Host snapshots the selection at the next prompt-assembly boundary and owns the model-visible effect.' },
+  'packages/client/ui-deepseek-model-label-1017': { kind: 'none', reason: 'Temporary browser release badge; leaves model catalogs and requests unchanged.' },
   'packages/client/ui-goal': { kind: 'indirect', reason: 'The strip verbs route goal.* mutations; the host GoalService owns the model-visible goal/change context message.' },
   'packages/extensions/ui-cordis': { kind: 'indirect', reason: 'The definition card drives the host dynamic run/stop verbs that the model\'s cordis_run/cordis_stop tools also reach; the runner owns any model-visible effect.' },
   'packages/client/ui-permission-presets': { kind: 'indirect', reason: 'The picker submits the host /permission command; the knob events it appends own the model-visible effect through the sandbox/approval consumers.' },
@@ -158,6 +162,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/client/ui-settings': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/ui-settings-general': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/ui-settings-models': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
+  'packages/client/ui-plugin-market': { kind: 'none', reason: 'Browser-side Discover tab; registers nothing model-facing.' },
   'packages/client/ui-plugin-manager': { kind: 'none', reason: 'Browser-side management surface; registers nothing model-facing.' },
   'packages/client/ui-settings-plugin-inventory': { kind: 'none', reason: 'Browser-side inventory projection; registers nothing model-facing.' },
   'packages/client/locale': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
@@ -176,6 +181,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/host/plugin-inventory': { kind: 'none', reason: 'Host-side read-only Loader projection; registers nothing model-facing.' },
   'packages/host/open-in-app': { kind: 'none', reason: 'Host routes opening desktop applications for a human; registers nothing model-facing.' },
   'packages/client/ui-open-in-app': { kind: 'none', reason: 'Browser-side split button opening the workspace directory for a human; registers nothing model-facing.' },
+  'packages/client/ui-secret-mask': { kind: 'none', reason: 'Browser-side display masking of sent user text; registers nothing model-facing.' },
   'packages/experimental/session-search': { kind: 'indirect', reason: 'The profile layer delegates model-visible behavior to its selected capability.' },
   'packages/experimental/ralph-bundle': { kind: 'indirect', reason: 'The profile layer delegates model-visible behavior to its selected capability.' },
   'packages/experimental/terminal-bundle': { kind: 'indirect', reason: 'The profile layer delegates model-visible behavior to its selected capability.' },
@@ -368,8 +374,9 @@ for (const packageJson of packageJsons) {
 
   const text = readFileSync(abs, 'utf8')
   const rawLines = text.split('\n')
-  const lines = markdownProseLines(text)
-  const headings = markdownHeadingLines(text)
+  const tree = parseMarkdown(text)
+  const lines = markdownProseLines(text, tree)
+  const headings = markdownHeadingLines(text, tree)
   const h2Headings = headings.filter(heading => heading.depth === 2)
   const modelExperienceHeadings = headings.filter(heading => heading.text
     .trim().replaceAll(/\s+/g, ' ').toLowerCase() === 'model experience')
