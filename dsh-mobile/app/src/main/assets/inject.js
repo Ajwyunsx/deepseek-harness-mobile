@@ -411,8 +411,20 @@
     // 一次高度：只比较 want 与上一次的值会让新元素停在 height:auto(=0)，补偿静默
     // 失效——表现就是对话末尾被固定输入座盖住。以元素自身的样式为准，不看缓存。
     if (spacerEl.style.height !== want + 'px') {
+      // 必须在改高度**之前**取读数：改完之后 scrollHeight 已经变了。
+      var floor = Math.max(0, sc.scrollHeight - sc.clientHeight);
+      var wasAtBottom = floor - sc.scrollTop <= 2;
       spacerEl.style.height = want + 'px';
       sc.style.scrollPaddingBottom = want + 'px';
+      // 间隔块变高会让 scrollHeight 变大而 scrollTop 不动，viewport 就停在原来
+      // 的位置、比新的底部高出「delta」——表现是最后一条消息被固定输入座压住
+      // （#16 残留：座从 0 高长到真实高度时 delta 正好是整个座高）。dsh 自己的
+      // 贴底跟随只观察列与滚动容器，不会因为我们的节点长高而重算，所以这里必须
+      // 自己补：只有本来就停在底部才跟随，用户上翻读历史时绝不能被拽回来。
+      if (wasAtBottom) {
+        var nextFloor = Math.max(0, sc.scrollHeight - sc.clientHeight);
+        if (nextFloor - sc.scrollTop > 2) sc.scrollTop = nextFloor;
+      }
     }
   }
 

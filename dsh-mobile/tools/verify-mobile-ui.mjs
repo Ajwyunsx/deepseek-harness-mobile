@@ -61,7 +61,18 @@ function translateX(transform) {
 const VIEWPORT = { width: 393, height: 851 }
 const DEVICE_SCALE = 2.75
 
-/** The page mirrors what the injector queries; the assets are the real ones. */
+/**
+ * The page mirrors what the injector queries; the assets are the real ones.
+ *
+ * DOM order copies upstream ConversationContent (packages/client/ui-conversation
+ * .../skeleton/ConversationContent.tsx): the composer seat is a CHILD of
+ * `[data-conversation-scroll]`, after the session views, and dsh makes it
+ * `position: sticky; bottom: 0` there. The injector then pins it with
+ * `position: fixed` and appends its spacer as the scroll body's LAST child, so
+ * the seat is not the last element — nesting the seat as a sibling instead (as
+ * this page used to) hides that ordering, and the `closest()` scopes the
+ * injector uses for the stats bar and the seat resolve differently.
+ */
 function pageHtml(css) {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -79,7 +90,7 @@ function pageHtml(css) {
   ._header_test { padding: 12px; }
   ._scrollBody_test { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
   .msg { padding: 10px 12px; border-bottom: 1px solid #eee; }
-  ._composerSeat_test { padding-bottom: 8px; }
+  ._composerSeat_test { padding-bottom: 8px; position: sticky; bottom: 0; z-index: 7; background: #fff; }
   ._composer_test { margin: 8px 12px; padding: 10px; border: 1px solid #ccd; border-radius: 14px; }
   ._composer_test textarea { width: 100%; height: 44px; border: 0; resize: none; }
 </style></head>
@@ -94,8 +105,9 @@ function pageHtml(css) {
       </div>
       <div class="_centerCol_test">
         <div class="_header_test">标题</div>
-        <div class="_scrollBody_test" id="scroller" data-conversation-scroll=""></div>
-        <div class="_composerSeat_test" data-composer-seat=""><div class="_composer_test"><textarea placeholder="发消息"></textarea></div></div>
+        <div class="_scrollBody_test" id="scroller" data-conversation-scroll="">
+          <div class="_composerSeat_test" data-composer-seat=""><div class="_composer_test"><textarea placeholder="发消息"></textarea></div></div>
+        </div>
       </div>
     </div>
   </div>
@@ -118,15 +130,20 @@ const SIDEBAR_TOGGLE_SCRIPT = `
  */
 const FIT_TICK_MS = 2400
 
+/** Message nodes, ignoring the seat and the injector's own nodes inside the scroll body. */
+const CONTENT_SELECTOR = ':scope > .msg'
+
 async function fillMessages(page, count) {
   await page.evaluate((n) => {
     const scroller = document.getElementById('scroller')
-    scroller.innerHTML = ''
+    for (const old of scroller.querySelectorAll(':scope > .msg')) old.remove()
+    const seat = scroller.querySelector('[data-composer-seat]')
     for (let i = 0; i < n; i += 1) {
       const div = document.createElement('div')
       div.className = 'msg'
       div.textContent = `消息 ${i + 1}：${'内容填充。'.repeat(12)}`
-      scroller.appendChild(div)
+      // Transcript rows precede the seat, matching upstream view order.
+      scroller.insertBefore(div, seat)
     }
     scroller.scrollTop = scroller.scrollHeight
   }, count)
@@ -138,13 +155,10 @@ async function overlapPx(page) {
     const scroller = document.getElementById('scroller')
     const seat = document.querySelector('[data-composer-seat]')
       || document.querySelector('div[class*="_composerSeat"]')
-    const last = scroller.lastElementChild
     const spacer = document.getElementById('dsh-mobile-composer-spacer')
-    if (!seat || !last) return { error: 'missing element' }
-    // Ignore the spacer itself: the real last *content* node is what must clear the seat.
-    const content = spacer && last.id === 'dsh-mobile-composer-spacer'
-      ? last.previousElementSibling
-      : last
+    const rows = scroller.querySelectorAll(':scope > .msg')
+    const content = rows.length === 0 ? null : rows[rows.length - 1]
+    if (!seat || !content) return { error: 'missing element' }
     scroller.scrollTop = scroller.scrollHeight
     return {
       overlap: Math.round(content.getBoundingClientRect().bottom - seat.getBoundingClientRect().top),
@@ -170,10 +184,9 @@ async function restingOverlapPx(page) {
     const seat = document.querySelector('[data-composer-seat]')
       || document.querySelector('div[class*="_composerSeat"]')
     const spacer = document.getElementById('dsh-mobile-composer-spacer')
-    const last = spacer && scroller.lastElementChild === spacer
-      ? spacer.previousElementSibling
-      : scroller.lastElementChild
-    if (!seat || !last || last.id === 'dsh-mobile-composer-spacer') return { error: 'missing element' }
+    const rows = scroller.querySelectorAll(':scope > .msg')
+    const last = rows.length === 0 ? null : rows[rows.length - 1]
+    if (!seat || !last) return { error: 'missing element' }
     const atBottom = Math.abs(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 2
     return {
       overlap: Math.round(last.getBoundingClientRect().bottom - seat.getBoundingClientRect().top),
@@ -192,19 +205,23 @@ async function scenarioComposerOverlap(page) {
   check(first.spacerHeight > 0, `spacer carries height (${first.spacerHeight}px)`)
   check(first.overlap <= 0, `last message clears the composer (overlap ${first.overlap}px)`)
 
-  // React may replace the scroll container's children wholesale; the injector has
-  // to re-apply the spacer height to the fresh element.
+  // React may replace the scroll container's children wholesale — the seat and its
+  // composer card are rebuilt with them, so the injector has to re-apply the
+  // spacer height against the fresh element rather than the detached one.
   await page.evaluate(() => {
     const scroller = document.getElementById('scroller')
-    const fresh = scroller.cloneNode(false)
-    scroller.replaceWith(fresh)
-    fresh.id = 'scroller'
+    for (const old of scroller.querySelectorAll(':scope > .msg, :scope > [data-composer-seat]')) old.remove()
     for (let i = 0; i < 12; i += 1) {
       const div = document.createElement('div')
       div.className = 'msg'
       div.textContent = `重建后的消息 ${i + 1}：${'内容填充。'.repeat(12)}`
-      fresh.appendChild(div)
+      scroller.appendChild(div)
     }
+    const seat = document.createElement('div')
+    seat.className = '_composerSeat_test'
+    seat.setAttribute('data-composer-seat', '')
+    seat.innerHTML = '<div class="_composer_test"><textarea placeholder="发消息"></textarea></div>'
+    scroller.appendChild(seat)
   })
   await page.waitForTimeout(FIT_TICK_MS)
   const second = await overlapPx(page)
@@ -231,7 +248,7 @@ async function scenarioColdStartHiddenSeat(page) {
   console.log('\nscenario: cold start lands on a hidden composer seat')
   await page.evaluate(() => {
     const scroller = document.getElementById('scroller')
-    scroller.innerHTML = ''
+    for (const old of scroller.querySelectorAll(':scope > .msg')) old.remove()
     scroller.style.removeProperty('scroll-padding-bottom')
     const spacer = document.getElementById('dsh-mobile-composer-spacer')
     if (spacer) spacer.remove()
@@ -268,6 +285,66 @@ async function scenarioColdStartHiddenSeat(page) {
 }
 
 /**
+ * The seat growing *after* the transcript settled (the 1+ACE5 report on #16).
+ *
+ * The screenshot shows a paused-goal bar docked above the input card, i.e. the
+ * seat was taller than the "one line of input" case the earlier scenarios stage.
+ * That dock is a `conversation.input.dock` slot inside the seat, and it mounts
+ * when the goal state arrives over the wire — long after the transcript landed at
+ * the bottom, and usually without any transcript mutation, so the injector's
+ * mutation observer never re-measures on its own.
+ *
+ * Growing the spacer moves `scrollHeight` while `scrollTop` stays put, so a
+ * reader resting at the bottom ends up exactly one growth taller than the floor
+ * and the transcript slides under the fixed seat. Only that resting reader may be
+ * carried to the new floor; a reader scrolled up must keep their position.
+ */
+async function scenarioSeatGrowsWhileResting(page) {
+  console.log('\nscenario: composer seat grows while the reader rests at the bottom')
+  await fillMessages(page, 12)
+  await page.waitForTimeout(FIT_TICK_MS)
+  const before = await restingOverlapPx(page)
+  check(before.atBottom === true, `transcript is at the bottom before the seat grows (${before.scrollTop})`)
+
+  // A dock card (paused goal / todo / queue) mounts inside the seat.
+  await page.evaluate(() => {
+    const seat = document.querySelector('[data-composer-seat]')
+    const dock = document.createElement('div')
+    dock.className = '_composerStack_test'
+    dock.id = 'test-dock'
+    dock.style.cssText = 'margin: 8px 12px; padding: 14px 16px; border: 1px solid #ccd; border-radius: 14px;'
+    dock.textContent = '已暂停的目标 继续 …'
+    seat.insertBefore(dock, seat.firstChild)
+  })
+  await page.waitForTimeout(FIT_TICK_MS)
+
+  const after = await restingOverlapPx(page)
+  check(after.spacerHeight >= before.spacerHeight,
+    `spacer follows the taller seat (${before.spacerHeight} → ${after.spacerHeight}px)`)
+  check(after.atBottom === true,
+    `the resting reader is carried to the new floor (atBottom=${after.atBottom}, scrollTop=${after.scrollTop})`)
+  check(after.overlap <= 0,
+    `the last message still clears the grown composer (overlap ${after.overlap}px)`)
+
+  // A reader who has scrolled up owns their position: growth must not drag them down.
+  const parked = await page.evaluate(() => {
+    const scroller = document.getElementById('scroller')
+    scroller.scrollTop = Math.round((scroller.scrollHeight - scroller.clientHeight) * 0.4)
+    return Math.round(scroller.scrollTop)
+  })
+  await page.waitForTimeout(FIT_TICK_MS)
+  await page.evaluate(() => {
+    document.getElementById('test-dock').style.padding = '40px 16px'
+  })
+  await page.waitForTimeout(FIT_TICK_MS)
+  const kept = await page.evaluate(() => Math.round(document.getElementById('scroller').scrollTop))
+  check(kept === parked, `an upward-scrolled reader is left alone (${parked} → ${kept})`)
+
+  await page.evaluate(() => document.getElementById('test-dock').remove())
+  await page.waitForTimeout(FIT_TICK_MS)
+}
+
+/**
  * The same compensation under a DOM whose *class fragments* have moved on.
  *
  * `_centerCol` / `_composerSeat` / `_scrollBody` are CSS-module fragments, so any
@@ -291,7 +368,7 @@ async function scenarioStableAttributeHooks(page) {
       el.className = el.className.replace(/_scrollBody/g, 'zzScrollRenamed')
     })
     const scroller = document.getElementById('scroller')
-    scroller.innerHTML = ''
+    for (const old of scroller.querySelectorAll(':scope > .msg')) old.remove()
     const spacer = document.getElementById('dsh-mobile-composer-spacer')
     if (spacer) spacer.remove()
   })
@@ -406,6 +483,7 @@ async function main() {
 
     await scenarioComposerOverlap(page)
     await scenarioColdStartHiddenSeat(page)
+    await scenarioSeatGrowsWhileResting(page)
     await scenarioStableAttributeHooks(page)
     await scenarioDrawerExit(page, 'fixed')
     await scenarioDrawerExit(page, 'second-run')
