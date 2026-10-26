@@ -1,4 +1,5 @@
 /** Native helper replacement is synchronized with Agent and provider disposal. */
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -55,11 +56,18 @@ vi.mock('@deepseek-ai/dsh-cua/native-client', async importOriginal => ({
 }))
 
 const config = {
+  agentPreset: false,
   helperPath: resolve('fixture-helper'), buildTimeoutMs: 300_000, timeoutMs: 10_000, connectTimeoutMs: 5000, screenshotTimeoutMs: 5000, axTimeoutMs: 3000, maxRequestBytes: 1024, maxResponseBytes: 4096, maxClipboardBytes: 8192, pasteReadTimeoutMs: 1000, maxAppMatches: 20,
-  graceMs: 10, textEventIntervalMs: 8, maxElements: 64, maxDepth: 8, dragDurationMs: 200, dragSteps: 10,
+  graceMs: 10, textEventIntervalMs: 8, maxClickHoldMs: 7000, maxElements: 64, maxDepth: 8, dragDurationMs: 200, dragSteps: 10,
 } satisfies Omit<NativeProvider.Config, 'allowedApps'>
 
 const { helperPath: _helperPath, ...automaticConfig } = config
+
+it('defaults the explicit click hold limit to five seconds and accepts a configured zero or larger limit', () => {
+  expect(NativeProvider.Config({}).maxClickHoldMs).toBe(5000)
+  for (const maxClickHoldMs of [0, 7000]) expect(NativeProvider.Config({ maxClickHoldMs }).maxClickHoldMs).toBe(maxClickHoldMs)
+  for (const maxClickHoldMs of [-1, 0.5, 2 ** 31]) expect(() => NativeProvider.Config({ maxClickHoldMs })).toThrow()
+})
 
 class ImageAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -85,7 +93,7 @@ async function setup(model?: { provider: string; model: string }) {
   await mountAgentLoopTestHarness(ctx)
   const handle = await ctx.agents.create({ sessionId: SessionId('native-lifecycle'), ...model ? { agentOptions: model } : {} })
   let index = 0
-  const execute = (method = 'listApps', params: Record<string, unknown> = {}, signal = new AbortController().signal) => ctx.tools.execute({
+  const execute = (method = 'listApps', params: Record<string, unknown> = {}, signal = new AbortController().signal) => executeToolFixture(ctx, {
     agent: handle.agent, signal, callId: ToolCallId(`lifecycle-${++index}`), name: 'cua', arguments: { method, params },
   })
   return { ctx, provider, handle, execute }
@@ -93,9 +101,9 @@ async function setup(model?: { provider: string; model: string }) {
 
 async function selectApplication(f: Awaited<ReturnType<typeof setup>>) {
   await f.ctx.plugin(UserQuestions)
-  f.ctx.on('user-questions/request', async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] }))
+  f.ctx.on('user-questions/request', async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this session'] }] }))
   native.request.mockResolvedValueOnce({ appHandle: 'app-one', pid: 17, name: 'Fixture',
-    authorization: { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: true } })
+    authorization: { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: false } })
   expect((await f.execute('getApp', { selector: 'Fixture' })).isError).toBe(false)
 }
 
@@ -105,7 +113,7 @@ it('rejects a relative helper path before publishing computer-use operations', a
   await expect(NativeProvider.apply(ctx, { ...config, allowedApps: { get: () => [] }, helperPath: 'relative-helper' })).rejects.toThrow('helperPath must be absolute')
 })
 
-it.each(['Allow for this task', 'Deny'])('obtains %s before a stopped application can launch', async (choice) => {
+it.each(['Allow for this session', 'Deny'])('obtains %s before a stopped application can launch', async (choice) => {
   const f = await setup()
   await f.ctx.plugin(UserQuestions)
   const asked: PromiseWithResolvers<void> = Promise.withResolvers()
@@ -130,7 +138,7 @@ it.each(['Allow for this task', 'Deny'])('obtains %s before a stopped applicatio
 it('rejects a launch result that changes the approved handle', async () => {
   const f = await setup()
   await f.ctx.plugin(UserQuestions)
-  f.ctx.on('user-questions/request', async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] }))
+  f.ctx.on('user-questions/request', async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this session'] }] }))
   native.request.mockResolvedValueOnce({ appHandle: 'pending-app', pid: null, name: 'Fixture', authorization: {
     id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: false,
   } }).mockResolvedValueOnce({ appHandle: 'another-app', pid: 17, name: 'Fixture' })
@@ -257,6 +265,24 @@ it('keeps Agent disposal pending until its helper cleanup completes', async () =
   } finally { release.resolve(); await disposing }
 })
 
+it('retains the computer-use registration until permission helper cleanup settles', async () => {
+  const f = await setup()
+  native.request.mockResolvedValue({ accessibility: false, screenRecording: false, helper: { pid: 9 }, parent: { pid: 8 } })
+  await f.ctx.cuaAccess.systemStatus()
+  const entered = Promise.withResolvers<undefined>(), release = Promise.withResolvers<undefined>()
+  native.dispose.mockImplementation(async () => { entered.resolve(undefined); await release.promise })
+  onTestFinished(() => { release.resolve(undefined) })
+  const registry = f.ctx.computerUse
+  const closing = f.provider.dispose()
+  try {
+    await entered.promise
+    expect(registry.providerName).toBe('dsh-cua')
+    release.resolve(undefined)
+    await closing
+    expect(registry.providerName).toBeUndefined()
+  } finally { release.resolve(undefined); await closing }
+})
+
 it('joins helper cleanup already started by Agent disposal when the provider unloads', async () => {
   const f = await setup()
   await f.execute()
@@ -281,7 +307,7 @@ it('reports failed cleanup after waiting for other owners and releasing their Ag
   const f = await setup()
   await f.execute()
   const other = await f.ctx.agents.create({ sessionId: SessionId('native-lifecycle-other') })
-  await f.ctx.tools.execute({
+  await executeToolFixture(f.ctx, {
     agent: other.agent, signal: new AbortController().signal, callId: ToolCallId('other-owner'),
     name: 'cua', arguments: { method: 'listApps', params: {} },
   })
@@ -317,7 +343,7 @@ it('reports failed cleanup after waiting for other owners and releasing their Ag
 it('rejects malformed and unowned operations before acquiring a helper', async () => {
   const f = await setup()
   expect((await f.execute('screenshot', { pid: 9, windowId: 7 })).isError).toBe(true)
-  const unowned = await f.ctx.tools.execute({
+  const unowned = await executeToolFixture(f.ctx, {
     signal: new AbortController().signal, callId: ToolCallId('unowned'), name: 'cua', arguments: { method: 'listApps', params: {} },
   })
   expect(unowned.isError).toBe(true)
@@ -428,8 +454,8 @@ it('maps the actual model-request image pixels back to native points without sto
   native.request.mockResolvedValue({ dispatched: true, verified: false })
   expect((await f.execute('click', { appHandle: 'app-one', windowId: 7, x: 5, y: 2.5 })).isError).toBe(false)
   expect(native.request).toHaveBeenLastCalledWith('click', { appHandle: 'app-one', windowId: 7, x: 200, y: 100 }, expect.any(AbortSignal), expect.any(String))
-  expect((await f.execute('click', { appHandle: 'app-one', windowId: 7, x: 500, y: 500, relative: true })).isError).toBe(false)
-  expect(native.request).toHaveBeenLastCalledWith('click', { appHandle: 'app-one', windowId: 7, x: 200, y: 100 }, expect.any(AbortSignal), expect.any(String))
+  expect((await f.execute('click', { appHandle: 'app-one', windowId: 7, x: 999, y: 999, relative: true })).isError).toBe(false)
+  expect(native.request).toHaveBeenLastCalledWith('click', { appHandle: 'app-one', windowId: 7, x: 399, y: 199 }, expect.any(AbortSignal), expect.any(String))
 })
 
 it.each([{ pixelWidth: 2 }, { pixelHeight: 2 }])('rejects native screenshot dimensions that disagree with decoded bytes: %j', async (invalid) => {
@@ -497,6 +523,8 @@ it.each([
   { owner: 'provider', stage: 'storage' },
   { owner: 'agent', stage: 'admission' },
   { owner: 'agent', stage: 'storage' },
+  { owner: 'revocation', stage: 'admission' },
+  { owner: 'revocation', stage: 'storage' },
 ])('waits for screenshot $stage and cancels its result during $owner disposal', async ({ owner, stage }) => {
   const f = await setup({ provider: 'image-fixture', model: 'vision' })
   await selectApplication(f)
@@ -526,7 +554,9 @@ it.each([
     const reached = await Promise.race([entered.promise.then(() => true), pending.then(() => false)])
     expect(reached).toBe(true)
     let closed = false
-    closing = (owner === 'provider' ? f.provider.dispose() : f.handle.dispose()).then(() => { closed = true })
+    closing = (owner === 'provider' ? f.provider.dispose()
+      : owner === 'agent' ? f.handle.dispose()
+        : f.ctx.cuaAccess.revoke('a'.repeat(64) as import('@deepseek-ai/dsh-cua/types').CuaApplicationId)).then(() => { closed = true })
     await setImmediate()
     expect(admissionSignal?.aborted).toBe(true)
     expect(closed).toBe(false)
@@ -623,7 +653,6 @@ it('rejects an unsupported native host before starting preparation', async () =>
   expect(native.prepare).not.toHaveBeenCalled()
 })
 
-
 it('stores signed application consent in the current profile and refuses unavailable settings', async () => {
   const f = await setup()
   await f.provider.dispose()
@@ -649,7 +678,7 @@ it('stores signed application consent in the current profile and refuses unavail
   await mountRootInclude(f.ctx, join(dir, 'cordis.yml'), readProfilePatches('test', profile))
   await f.ctx.loader.await()
   await f.ctx.plugin(UserQuestions)
-  const answer = vi.fn(async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] }))
+  const answer = vi.fn(async () => ({ answers: [{ id: 'cua-app-access', selected: ['Allow for this session'] }] }))
   f.ctx.on('user-questions/request', answer)
   native.request.mockResolvedValue({ appHandle: 'task-app', pid: 17, name: 'Fixture',
     authorization: { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: true } })
@@ -660,7 +689,7 @@ it('stores signed application consent in the current profile and refuses unavail
   await f.ctx.hmr.runExclusive(async () => {})
   expect(f.ctx.settings.describe().find(row => row.ns === 'cua')?.autoGenerate).toBe(false)
   answer.mockResolvedValue({ answers: [{ id: 'cua-app-access', selected: ['Always allow'] }] })
-  const authorization = { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: true }
+  const authorization = { id: 'b'.repeat(64), name: 'Fixture', executablePath: '/fixture/app', persistable: true }
   native.request.mockResolvedValue({ appHandle: 'signed-app', pid: 17, name: 'Fixture', authorization })
   expect((await f.execute('getApp', { selector: 'Fixture' })).isError).toBe(false)
   expect(await readFile(profile.patchPath, 'utf8')).toContain(authorization.id)
@@ -671,7 +700,7 @@ it('stores signed application consent in the current profile and refuses unavail
   expect(revoked.isError).toBe(true)
   expect(JSON.stringify(revoked.content)).toContain('APP_ACCESS_REVOKED')
   vi.spyOn(f.ctx.settings, 'describe').mockReturnValue([])
-  native.request.mockResolvedValue({ appHandle: 'different-app', pid: 18, name: 'Other fixture', authorization: { ...authorization, id: 'b'.repeat(64) } })
+  native.request.mockResolvedValue({ appHandle: 'different-app', pid: 18, name: 'Other fixture', authorization: { ...authorization, id: 'c'.repeat(64) } })
   const unavailable = await f.execute('getApp', { selector: 'Fixture' })
   expect(unavailable.isError).toBe(true)
   expect(JSON.stringify(unavailable.content)).toContain('APP_ACCESS_DENIED')

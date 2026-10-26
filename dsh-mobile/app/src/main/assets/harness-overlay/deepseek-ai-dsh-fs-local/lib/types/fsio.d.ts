@@ -67,6 +67,14 @@ export interface LocalDirEntry {
     size?: number;
 }
 /**
+ * Replace a leading `~` with the host user's home directory in a caller-supplied path.
+ * `~/` is recognized on every platform and `~\` only on Windows; `~user` and later `~`
+ * segments stay literal. The rest of the spelling is kept so parent traversal still resolves physically.
+ * @param path - requested path from a model, plugin, or other caller; never a directory entry name.
+ * @returns the path with its home prefix replaced, or `path` unchanged.
+ */
+export declare function expandHomePrefix(path: string): string;
+/**
  * Anchor a path using native drive semantics and POSIX physical parent traversal.
  * @param cwd - provider base directory for relative paths.
  * @param path - non-empty requested path.

@@ -7,10 +7,11 @@ import { execa } from 'execa'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import {
-  DEFAULT_PROFILE_BUNDLES, bundlePatchPaths, initProfile, PROFILE_TEMPLATES, readProfileManifest,
+  bundlePatchPaths, initProfile, readProfileManifest,
   resolveBundleDir, resolveProfileDir, loadOverlayPatches, composeEntries, readProfileVersionExemptions,
   evaluatePluginCompatibility, pluginCompatibilityWarning, type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
+import { PROFILE_TEMPLATES, DEFAULT_PROFILE_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import { parseInstallSpec } from './install-spec.ts'
 import { awaitTreeGone, leadsOwnGroup, treeAlive, type RunTree } from './run-tree.ts'
@@ -583,6 +584,8 @@ export interface PackageViewOptions {
   timeoutMs: number
   /** The registry asked; null asks the one pnpm's own configuration names. */
   registry?: Registry
+  /** The manifest fields printed, as `pnpm view` names them; registry-only fields such as `versions`, `time`, and `dist-tags` included. */
+  fields: readonly string[]
 }
 
 /**
@@ -620,12 +623,12 @@ export function registryArguments(registry: Registry): string[] {
  * configured after it are the retry.
  * @param dir Profile directory.
  * @param spec One registry spec: a package name with an optional range.
- * @param options The registry, cancellation, and the time bound.
+ * @param options The fields printed, the registry, cancellation, and the time bound.
  * @returns pnpm's exit, output, and how the lookup ended.
  */
 export async function viewProfilePackage(dir: string, spec: string, options: PackageViewOptions): Promise<PackageViewResult> {
   const result = await execa(options.command ?? 'pnpm', [
-    ...options.args ?? [], 'view', spec, 'name', 'version', 'description', 'dsh', '--json',
+    ...options.args ?? [], 'view', spec, ...options.fields, '--json',
     ...registryArguments(options.registry ?? null), '--config.fetch-retries=0',
   ], {
     cwd: dir, env: { ...scrubbedParentEnv(), ...options.env }, extendEnv: false, reject: false, stdin: 'ignore',

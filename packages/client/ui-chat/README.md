@@ -10,7 +10,7 @@ Desktop product events use the optional [product analytics service](../product-a
 
 ## Summary
 
-Use this package to render a browser chat from recorded Session conversations, including historical images, localized actions, and restored scroll position. Work-details modes control reasoning previews and process visibility without hiding final answers; Verbose keeps completed-turn process rows visible. Local transcript and steering submissions appear immediately, remain in their original surface, and disappear atomically when authoritative Session records arrive, while queued submissions stay outside Chat. The package does not assemble or modify model requests.
+Use this package to render a browser chat from recorded Session conversations, including historical images, localized actions, and restored scroll position. Work-details modes control reasoning previews and process visibility without hiding Assistant replies; Verbose keeps completed-turn process rows visible. Local transcript and steering submissions appear immediately, remain in their original surface, and disappear atomically when authoritative Session records arrive, while queued submissions stay outside Chat. The package does not assemble or modify model requests.
 
 File-mention providers receive the viewed Session ID with the closing-turn owner, so links into inherited history can address the fork itself.
 
@@ -32,6 +32,8 @@ File-mention providers receive the viewed Session ID with the closing-turn owner
 
 <a id="reference-previews"></a>
 ## Reference previews
+
+Image drag actions arrive through the image entry’s inject face from [ui-file-drag](../ui-file-drag/README.md).
 
 Sent generic-file attachments retain the draft's [file-card radius](../../../docs/ui-radius.md#radius-scale).
 
@@ -68,9 +70,11 @@ A completed Turn shows an expandable usage row only when the loaded window inclu
 
 Settings → General → Performance & usage appears after Send behavior while busy and before Session Log upload, and stores `ui-chat.performanceUsage` as `detailed` (default) or `compact`. Compact shows only available output speed and cache-hit percentage beneath the composer, without interactive statistic dialogs or per-Turn usage. Detailed exposes session statistics and per-Turn token usage. Neither mode shows elapsed time in the completed-turn footer. The preference changes presentation only; accounting and Session events remain intact.
 
-The composer statistics are two `conversation.composer.dock` list entries: `activity` (order 0, turn and step counts and output speed, with LLM time, tool time, and TTFT) and `usage` (order 1, token total and cache hit). The controls follow the shared [statistics-control radius](../../../docs/ui-radius.md#radius-scale). Another plugin replaces one control by registering the same id and the same `order`; the dock orders rows by `order`, while a lower `priority` picks the replacement: a dynamic plugin receives one automatically, and a statically composed plugin passes it explicitly. A new id adds a control. Each control carries its id in `data-composer-stat`. An open statistics dialog closes on Escape or on a pointerdown or click outside it, so activating another control by pointer or keyboard swaps dialogs instead of stacking them.
+The composer statistics are two `conversation.composer.dock` list entries: `activity` (order 0, turn and step counts and output speed, with LLM time, tool time, and TTFT) and `usage` (order 1, token total and cache hit). The controls follow the shared [statistics-control radius](../../../docs/ui-radius.md#radius-scale). Another plugin replaces one control by registering the same id and the same `order`; the dock orders rows by `order`, while a lower `priority` picks the replacement: a dynamic plugin receives one automatically, and a statically composed plugin passes it explicitly. A new id adds a control. Each control carries its id in `data-composer-stat`. An open statistics dialog closes on Escape or on a pointerdown or click outside it, so activating another control by pointer or keyboard swaps dialogs instead of stacking them. When an ellipsis cuts off a reading, a tooltip shows the full reading. A dialog control shows it on hover or keyboard focus, but not while its dialog is open; a reading without a dialog shows it on hover, click, or tap. The session statistics dialog heads its rows with the turn and step counts.
 
 Explicit selections update every consumer immediately; accepted Host settings reconcile the live value, so a refused or pending write keeps the selected mode until the Host answers.
+
+In narrow browser settings, preference labels use a smaller gutter before their controls. Windows and macOS desktop windows retain the standard spacing.
 
 Preference menus restore focus to their trigger without scrolling before publishing a new selection.
 
@@ -79,7 +83,7 @@ Preference menus restore focus to their trigger without scrolling before publish
 
 Artifact extensions can subscribe to one Turn and Node kind through `ChatNodeStore.turnDataSource`. The source includes hidden Nodes and exposes their business data in anchor order. Membership updates incrementally; only observed collections materialize ordered arrays, and unrelated Turns or kinds do not notify them.
 
-The completed-turn action footer follows the recorded Turn end. Its action row starts 20px below preceding prose or extension content. Actions remain visible only on the latest Turn when its final visible content is a reply; other endings and historical Turns reveal actions on hover or keyboard focus. Devices without hover keep actions visible.
+The completed-turn action footer follows the recorded Turn end. Its action row starts 20px below preceding prose or extension content. Actions remain visible only on the latest Turn when its final visible content is a reply; other endings and historical Turns reveal actions on hover or keyboard focus. Devices without hover keep actions visible. An unavailable branch action opens its explanation on click or tap without creating a branch.
 
 -----
 
@@ -90,9 +94,9 @@ During uninterrupted following, local transcript and steering echoes remain moun
 
 When Chat ends with an open Turn control and that Turn has no visible input, the first local transcript echo precedes the control. Other echoes remain at the flow tail. The control and echoes share one keyed list, so arrival of the control preserves the echo's mounted identity. Durable inputs replace their matching echoes in the same render.
 
-Work-details modes control process-group display and reasoning previews. Compact, Standard, and Detailed fold eligible completed Turns without hiding the final answer; Verbose retains the duration/status header without a collapse action and shows historical process rows directly. The [business-rule reference](src/client/conversation-nodes/README.md#display-modes) contains the mode table, title behavior, whole-Turn eligibility, clocks, and disclosure resets.
+Work-details modes control process-group display and reasoning previews. Compact, Standard, and Detailed fold eligible completed Turns while keeping every Assistant reply visible, or only the final answer under Final answer only; Verbose retains the duration/status header without a collapse action and shows historical process rows directly. The [business-rule reference](src/client/conversation-nodes/README.md#display-modes) contains the mode table, title behavior, whole-Turn eligibility, clocks, and disclosure resets.
 
-The Settings row below Work details offers an [independent collapse-timing preference](src/client/conversation-nodes/README.md#collapse-timing), saved through the same Host profile configuration.
+The Settings rows below Work details offer an [independent collapse-timing preference](src/client/conversation-nodes/README.md#collapse-timing) and a [Replies After Collapse preference](src/client/conversation-nodes/README.md#folded-replies) (`ui-chat.foldedReplies`, hidden in Verbose), both saved through the same Host profile configuration.
 
 -----
 
@@ -107,11 +111,11 @@ The Chat Builder publishes `bottomSource` per Node: true for visible Nodes belon
 
 Live tool deltas share reasoning's frame-batched publication; durable calls and results publish immediately. Native and nested results retain event presentation metadata, so historical file and command labels use the operation’s location. Repeated deltas retain the Tool node when observed argument answers, the anchor, location, and visibility are unchanged. The Definition supplies the same lazy argument reader to tool rows and group detail, without tool-specific registration.
 
-The process group uses a stable `div` layout box, a scroll body, and an uncapped content box that reports growth inside the body. Business styles must adapt spacing within and across groups, including hidden or empty members and the answer-spacing exception. The `conversation.chat.flow` slot adds a `display: contents` DOM anchor; row selectors match that anchor directly, without repeating its column ancestry. The running status shares the rows' parent, so its divider uses the same visible-sibling rules. The anchor contributes no spacing of its own. CSS variables do not belong in the Group Definition.
+The process group uses a stable `div` layout box, a scroll body, and an uncapped content box that reports growth inside the body. Business styles must adapt spacing within and across groups, including hidden or empty members and the answer-spacing exception. The `conversation.chat.flow` slot adds a `display: contents` DOM anchor; row selectors match that anchor directly, without repeating its column ancestry. The running status shares the rows' parent, so its divider uses the same visible-sibling rules. The anchor contributes no spacing of its own. The earlier-history control directly precedes the flow anchor; their sibling relationship supplies the leading gap. CSS variables do not belong in the Group Definition.
 
-Running group titles, reasoning previews, tool and command rows, the active retry line, and the bottom running status use the shared [TextShimmer](../ui-primitives/README.md#component-catalog). Each row’s text shares one left-to-right highlight, including collapsed group titles; icons and hover chevrons retain their base appearance. Tool and process rows sit 6px apart. An expanded group title has 8px before its content, Assistant responses have 12px from adjacent process rows, and completed-Turn duration/status controls have 16px around them. Hidden and empty rows, including retained empty slot anchors, add no gap. The running “Deep diving” text retains its blue base while its theme-specific highlight sweeps across it.
+Running group titles, reasoning previews, tool and command rows, the active retry line, and the bottom running status use the shared [TextShimmer](../ui-primitives/README.md#component-catalog). Each row’s text shares one left-to-right highlight, including collapsed group titles; icons and hover chevrons retain their base appearance. Ordinary flow rows sit 4px apart. An expanded group title has 8px before its content, Assistant responses have 12px from adjacent process rows, and completed-Turn duration/status controls have 16px from their input and from a directly following visible row. A reply that follows the control after folded rows keeps the 12px reply gap, so folding never changes its spacing. Hidden and empty rows, including retained empty slot anchors, add no gap. The running “Deep diving” text retains its blue base while its theme-specific highlight sweeps across it.
 
-The running status shows a whale whose APNG mask inherits the text color. CSS selects the static SVG when reduced motion or forced colors are active, or alpha masks are unsupported. The build embeds the image in the plugin stylesheet; React does not pass image data through DOM styles.
+The running status shows a whale whose APNG mask inherits the text color. CSS selects the static SVG when reduced motion or forced colors are active, or alpha masks are unsupported. The APNG is a [package asset](../AGENTS.md#dependency-declaration) referenced by the plugin stylesheet; React does not pass image data through DOM styles.
 
 Scroll-edge fades initialize when `ResizeObserver` reports the open group's layout; opening the group performs no immediate scroll-dimension read in a layout effect.
 
@@ -171,6 +175,10 @@ Active-Turn highlighting is approximate: `readVisibleTurn` binary-searches the f
 </details>
 
 -----
+
+The Chat view detects selection and context-menu gestures on business nodes marked with `data-text-interaction-source`. Both selection endpoints must resolve to the same source container. Displayed user content and settled Assistant text or reasoning participate; tools, injected context, streaming or interrupted Assistant text, and Markdown controls do not.
+
+`ctx.uiConversation.interactions` dispatches eligible gestures to plugin registrations and supplies their component to the Chat view. The action surface is absolutely positioned inside the existing Chat column, above the composer seat and its dock. Its wrapper preserves the component's outer stroke and shadow; components own internal scrolling. Scrolling the selection outside that visible region temporarily hides the surface; returning restores it. Chat owns viewport visibility, placement, outside pointer presses, Escape, new selections, source invalidation, and disposal; explicit dismissal preserves browser selection and layout changes do not reopen the surface. [Message quotes](../../session/message-quotes/README.md) owns quotation eligibility and insertion.
 
 <a id="model-experience"></a>
 ## Model Experience

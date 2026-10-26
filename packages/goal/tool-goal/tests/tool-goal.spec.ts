@@ -1,9 +1,11 @@
+import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus, Inbox } from '@deepseek-ai/dsh-agent'
-import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import GoalService, { GoalId } from '@deepseek-ai/dsh-goal'
 import type { GoalRef } from '@deepseek-ai/dsh-goal'
 import { createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -20,7 +22,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as toolGoal from '@deepseek-ai/dsh-tool-goal'
-import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { unsupportedModel, createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -49,7 +51,10 @@ function stubAgent(rawId: string, supplied?: Session, suppliedCtx?: Context): St
     ? agentCtx.sessions.create(SessionId(rawId))
     : suppliedCtx.sessions.create(SessionId(rawId)))
   if (suppliedCtx === undefined) {
-    if (agentCtx.sessions.get(session.id) !== session) agentCtx.sessions.enter(session)
+    if (agentCtx.sessions.get(session.id) !== session) {
+      agentCtx.sessions.enter(session)
+      agentCtx.sessions.announce(session)
+    }
   }
   const inbox = createInboxStub()
   let status: AgentStatus = 'running'
@@ -57,6 +62,7 @@ function stubAgent(rawId: string, supplied?: Session, suppliedCtx?: Context): St
     id: session.id,
     options: {},
     session,
+    model: unsupportedModel(),
     inbox,
     get status() { return status },
     ctx: agentCtx,
@@ -104,7 +110,7 @@ async function harness(config: toolGoal.Config = {}) {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(ToolRuntime)
-  ctx.sessionProjections.register(turnBoundaryProjectionDefinition)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(GoalService)
   const fiber = await ctx.plugin(toolGoal, config)
   const root = stubAgent(`goal-tool-root-${Math.random()}`, undefined, ctx)
@@ -120,7 +126,7 @@ async function execute(
   agent?: Agent,
   initiator: Agent | undefined = agent,
 ): Promise<ToolExecutionResult> {
-  const run = () => ctx.tools.execute({
+  const run = () => executeToolFixture(ctx, {
     signal: testToolSignal,
     callId: ToolCallId(`call-${Math.random()}`),
     name,
@@ -153,8 +159,9 @@ describe('goal tool registration and presentation', () => {
     const { ctx, fiber } = await harness({ blockedAfterConsecutiveRounds: 5 })
     expect(['create_goal', 'get_goal', 'update_goal'].map(name => ctx.tools.get(name)?.name))
       .toEqual(['create_goal', 'get_goal', 'update_goal'])
+    const pipeline = new ToolExecutionPipeline(ctx)
     for (const name of ['create_goal', 'get_goal', 'update_goal']) {
-      expect(ctx.tools.executionMode({ signal: testToolSignal, callId: ToolCallId(name), name, arguments: {} }))
+      expect(pipeline.executionMode({ signal: testToolSignal, callId: ToolCallId(name), name, arguments: {} }))
         .toEqual({ kind: 'exclusive' })
     }
     const section = (await ctx.systemPrompt.assemble()).sections.find(item => item.name === 'tool:goal')
@@ -195,20 +202,21 @@ describe('goal tool registration and presentation', () => {
   it('has the Loader-safe namespace export shape', () => {
     expect('default' in toolGoal).toBe(false)
     expect(toolGoal.name).toBe('tool-goal')
-    expect(toolGoal.inject).toEqual(['agents', 'goals', 'tools', 'systemPrompt', 'sessionProjections'])
+    expect(toolGoal.inject).toEqual(['agents', 'goals', 'tools', 'systemPrompt'])
     const loader = Object.create(Loader.prototype) as Loader
     expect(loader.unwrapExports(toolGoal)).toBe(toolGoal)
   })
 
   it('fails invalid direct config before registering anything', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(GoalService)
-    expect(() => {
-      toolGoal.apply(ctx, { blockedAfterConsecutiveRounds: 1.5 })
-    }).toThrow(
+    expect(() => { toolGoal.apply(ctx, { blockedAfterConsecutiveRounds: 1.5 }) }).toThrow(
       'blockedAfterConsecutiveRounds must be a positive safe integer',
     )
     expect(ctx.tools.get('get_goal')).toBeUndefined()
@@ -216,9 +224,12 @@ describe('goal tool registration and presentation', () => {
 
   it('resolves the direct-apply default before registration', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(GoalService)
     toolGoal.apply(ctx, {})
     const section = (await ctx.systemPrompt.assemble()).sections.find(item => item.name === 'tool:goal')
@@ -246,7 +257,7 @@ describe('goal tool execution authority', () => {
     expect(agentless.error?.info?.code).toBe('GOAL_TOOL_AGENT_REQUIRED')
 
     openTurn(root, { kind: 'user' })
-    const driverless = await ctx.tools.execute({
+    const driverless = await executeToolFixture(ctx, {
       signal: testToolSignal,
       callId: ToolCallId('call-driverless'),
       name: 'get_goal',
@@ -329,6 +340,26 @@ describe('goal tool execution authority', () => {
       goal_id: 'goal-missing', revision: 1, action: 'pause', objective: 'probe',
     }, root.agent)
     expect(malformed.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+  })
+
+  it('does not carry human authority into a later non-human turn', async () => {
+    const { ctx, root } = await harness()
+    const turn = openTurn(root, { kind: 'user' })
+    await execute(ctx, 'get_goal', {}, root.agent)
+    closeTurn(root, turn)
+    openTurn(root, { kind: 'test' })
+    const result = await execute(ctx, 'create_goal', { objective: 'unauthorized' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
+  })
+
+  it('reconstructs current-turn authority when the tools mount after input was committed', async () => {
+    const { ctx, root, fiber } = await harness()
+    await fiber.dispose()
+    openTurn(root, { kind: 'user' })
+    await ctx.plugin(toolGoal, {})
+    const result = await execute(ctx, 'create_goal', { objective: 'accepted before tool load' }, root.agent)
+    expect(resultGoal(result)).toMatchObject({ objective: 'accepted before tool load' })
   })
 
   it('accepts direct human steering in a goal-sourced root turn', async () => {

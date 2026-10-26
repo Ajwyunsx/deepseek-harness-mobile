@@ -1,3 +1,5 @@
+import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { es, pt } from '../src/client/locales.ts'
 // @vitest-environment jsdom
 /** Trajectory ledger selection, details, status, and fold behavior. */
 
@@ -927,6 +929,26 @@ describe('TrajectoryTable', () => {
     expect(screen.queryByText('Completed')).toBeNull()
   })
 
+  it.each([false, true])('places the request separator after input and prompt rows (waiting: %s)', (waiting) => {
+    const turns: readonly TrajectoryTurnModel[] = [{
+      turn: 2,
+      groups: [{
+        title: 'Step 1',
+        cells: [
+          { index: 1, kind: 'user', text: 'Continue', timeSeconds: 0 },
+          { index: 2, kind: 'context', text: 'Tool added: search', timeSeconds: 0 },
+          { index: 3, kind: 'system', text: 'Tools Updated', timeSeconds: 0 },
+          { index: 4, kind: 'message', text: waiting ? '' : 'Answer', requestOnly: waiting, timeSeconds: 0 },
+        ],
+      }],
+    }]
+    const view = render(<TrajectoryTable turns={turns} {...FOLD_PROPS} />)
+    const rows = [...view.container.querySelectorAll('tr[data-kind]')]
+    const requestRow = screen.getByRole('button', { name: 'Request #1' }).closest('tr')
+    expect(rows.indexOf(requestRow!)).toBe(3)
+    expect(screen.getByRole('row', { name: 'SYSTEM, Tools Updated' }).contains(requestRow)).toBe(false)
+  })
+
   it('marks failed requests and lays coincident request markers left to right', () => {
     const turns: readonly TrajectoryTurnModel[] = [
       {
@@ -1072,13 +1094,13 @@ describe('TrajectoryTable', () => {
     expect(toolTag?.getAttribute('title')).toBeNull()
     expect(toolIcon).toBeTruthy()
 
-    fireEvent.mouseEnter(toolTag as HTMLElement)
+    fireEvent.pointerEnter(toolTag as HTMLElement)
     expect(screen.queryByRole('tooltip')).toBeNull()
-    fireEvent.mouseEnter(toolIcon as HTMLElement)
+    fireEvent.pointerEnter(toolIcon as HTMLElement)
     const tooltip = screen.getByRole('tooltip')
     expect(tooltip.textContent).toBe('TOOL')
     expect(tooltip.getAttribute('data-side')).toBe('right')
-    fireEvent.mouseLeave(toolIcon as HTMLElement)
+    fireEvent.pointerLeave(toolIcon as HTMLElement)
     expect(screen.queryByRole('tooltip')).toBeNull()
   })
 
@@ -1329,4 +1351,9 @@ describe('TrajectoryTable', () => {
     expect(screen.getByRole('row', { name: /TOOL/ }).getAttribute('aria-selected')).toBe('false')
     expect(onInspectApplied).not.toHaveBeenCalled()
   })
+})
+
+it('preserves seconds and token units in translated metric labels', () => {
+  expect(makeTranslate(es)('unit.seconds', { value: '1.25' })).toBe('1.25 s')
+  expect(makeTranslate(pt)('unit.tokens', { value: 42 })).toBe('42 tok')
 })

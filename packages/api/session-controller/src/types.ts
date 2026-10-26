@@ -1,6 +1,7 @@
 /** Browser-safe request, result, and lifecycle vocabulary for the Session Remote service. */
-import type { NativeFileApplication } from '@deepseek-ai/dsh-native-command/types'
 
+import type {} from '@deepseek-ai/dsh-agent/types'
+import type { NativeFileApplication } from '@deepseek-ai/dsh-native-command/types'
 import type {
   AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
@@ -8,37 +9,21 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { TextBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
-import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
+import type { SessionProjectionMap, SessionProjectionSummaryExcluded, SessionProjectionSummaryValues } from '@deepseek-ai/dsh-session-projection/types'
 import type { Principal } from '@deepseek-ai/dsh-typert-protocol'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    /** Host state persisted for cold Session list summaries. */
-    sessionListMetadata: SessionListMetadata
-    /** Host state for the boot-constant image-limit view. */
-    imageLimits: null
-    /** Durable model selection already used by a request and still pending for a later request. */
-    modelSelection: ModelSelectionProjectionState
-  }
   interface SessionProjectionMap {
     /** Persisted facts used to summarize a Session without activating it. */
     sessionListMetadata: SessionListMetadata
-    /** Image-intake limits enforced by the Session prompt endpoint. */
-    imageLimits: ImageAttachmentLimits
-    /** Durable model selection already used and selected for the next request. */
-    modelSelection: ModelSelectionProjection
-  }
-}
-
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
     /**
-     * Complete validated model selection requested for subsequent prompt
-     * assembly. Log-only: it never enters derived model history.
+     * Image-intake limits enforced by the Session prompt endpoint. Boot
+     * constant, excluded from Session summary payloads: every Session shares
+     * it, so a list row would repeat one host-wide fact.
      */
-    'model/selection': ModelSelection
+    imageLimits: SessionProjectionSummaryExcluded<ImageAttachmentLimits>
   }
 }
 
@@ -51,10 +36,11 @@ export interface SessionListMetadata {
 }
 
 /**
- * Every available wire value a Session-list row carries as partial, possibly
- * stale hints. `kind` and `asOfSeq` are independent facts: `kind` says which
- * sequence space `asOfSeq` belongs to, and therefore how a client may merge
- * the block; `asOfSeq` is the producer's watermark in that space.
+ * Every available summary wire value a Session-list row carries as partial,
+ * possibly stale hints. The block omits the keys whose unit declares
+ * `summary: false`. `kind` and `asOfSeq` are independent facts: `kind` says
+ * which sequence space `asOfSeq` belongs to, and therefore how a client may
+ * merge the block; `asOfSeq` is the producer's watermark in that space.
  */
 export interface SessionProjectionHints {
   /**
@@ -67,8 +53,8 @@ export interface SessionProjectionHints {
   readonly kind: 'cached' | 'sequenced'
   /** Watermark of the block in the sequence space named by `kind`. */
   readonly asOfSeq: number
-  /** Provider-validated values present in the block; omitted keys remain unknown. */
-  readonly values: SessionProjectionValues
+  /** Provider-validated summary values present in the block; omitted keys remain unknown. */
+  readonly values: Partial<SessionProjectionSummaryValues>
 }
 
 /** Complete projection values at an exact Session event cursor. */
@@ -85,7 +71,8 @@ export type SessionProjectionValues = Partial<SessionProjectionMap>
 /**
  * Browser-submitted prompt content; the Host promotes image bytes to durable
  * references. File parts carry the opaque receipt returned by a preceding
- * `uploadFile` call on the same Session.
+ * upload on the same Session; the receipt of an image upload enters the
+ * message as that image.
  */
 export type PromptContentPart =
   | { readonly type: 'text'; readonly text: string }
@@ -102,22 +89,6 @@ export interface ModelSelection {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort?: string
-}
-
-/** Host fold state for durable model selection. */
-export interface ModelSelectionProjectionState {
-  /** Selection consumed by the latest recorded model request. */
-  readonly lastUsed: ModelSelection | null
-  /** Later user selection not yet consumed by a matching model request. */
-  readonly pending: ModelSelection | null
-}
-
-/** Client view of the durable model-selection fold. */
-export interface ModelSelectionProjection {
-  /** Selection consumed by the latest recorded model request. */
-  readonly lastUsed: ModelSelection | null
-  /** Selection the next request should use, falling back to {@link lastUsed}. */
-  readonly next: ModelSelection | null
 }
 
 /** One adapter-owned reasoning effort for an exact model route. */

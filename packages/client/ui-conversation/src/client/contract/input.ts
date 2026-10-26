@@ -182,6 +182,9 @@ export interface InputTarget {
 
 /** Per-session input facade owned by the conversation wiring layer. */
 export interface SessionInput extends InputTarget {
+  /** Insert selected transcript text as an atomic quote. @param text - nonblank selection. @returns whether editing accepted it. */
+  insertQuote(text: string): boolean
+
   /** Replace the whole draft with plain text, removing inline reference chips. */
   setDraft(text: string): void
   /** Append ordered browser-owned attachment ids; busy admission phases refuse. */
@@ -222,7 +225,7 @@ export interface SessionInputResolver {
   /**
    * Prepare the exact retained Session before navigation publishes it.
    * @param binding - target Session generation, already retained by the caller.
-   * @param options - content to adopt and explicit permission to replace existing text.
+   * @param options - content to adopt and the handling of an existing draft.
    * @returns applied, preserved, or blocked by a pending submission or disposal.
    * @throws when binding is not the currently retained Session generation.
    */
@@ -232,7 +235,15 @@ export interface SessionInputResolver {
 /** Initial text for a target Session; attachments remain under their existing owner. */
 export interface DraftInitializationOptions {
   readonly prompt?: string
+  /** `true` acts as `whenDraftExists: 'replace'`; ignored when `whenDraftExists` is set. */
   readonly clearPreviousDraft?: boolean
+  /**
+   * Handling of a target that already has text or attachments: `replace` swaps the text and
+   * inline references for the prompt (or clears them without one), `append` adds the prompt
+   * as new paragraphs after the existing text, and `keep` leaves the draft unchanged. Omitted,
+   * it is `replace` when `clearPreviousDraft` is true and `keep` otherwise.
+   */
+  readonly whenDraftExists?: 'replace' | 'append' | 'keep'
 }
 
 /** An initialization request never waits for a React mount or a remote catalog. */
@@ -240,11 +251,13 @@ export type DraftInitializationResult = 'applied' | 'preserved' | 'blocked'
 
 /**
  * The public input action face provided to every session-scope slot
- * component: stable-identity void callbacks, mirroring the
+ * component: stable-identity callbacks, mirroring the
  * useStore+actions convention. Command-style handles (arbitrate/space/
  * paste/…) stay InputBar-private and never ride this face.
  */
 export interface InputActions {
+  /** Insert one nonblank transcript quote. @param text - selected text. @returns whether editing accepted it. */
+  insertQuote(text: string): boolean
   /** @returns a revision-guarded copy of the current editor selection. */
   captureInsertion(): TokenSpan
   /**

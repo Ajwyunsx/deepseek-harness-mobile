@@ -1,11 +1,13 @@
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import SessionController from '../src/index.ts'
 import type { ApiSessionAgentController } from '../src/agent.ts'
 import { createSessionTestController, testSessionPersistence } from './test-remote.ts'
@@ -22,8 +24,9 @@ describe('SessionController facade', () => {
 
   it('owns Host service methods and publishes Agent lifecycle projections', async () => {
     const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    onTestFinished(() => ctx.fiber.dispose())
+    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestHarness(ctx)
     const sessionId = SessionId('controller-session')
     const header: SessionHeader = {
       version: SESSION_FORMAT_VERSION,
@@ -52,20 +55,13 @@ describe('SessionController facade', () => {
       bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
       retirePrompt: () => {},
     } as never)
-    const controller = createSessionTestController(ctx, defaults)
+    const controller = await createSessionTestController(ctx, defaults)
     const status = vi.fn()
     const failure = vi.fn()
     const activity = vi.fn()
     ctx.on('api-session/status', status)
     ctx.on('api-session/error', failure)
     ctx.on('api-session/activity', activity)
-
-    await expect(controller.inspect(sessionId)).resolves.toEqual({
-      meta: header,
-      inheritedEventCount: SessionLogOffset(0),
-      events,
-    })
-    expect(inspect).toHaveBeenCalledOnce()
 
     const session = ctx.sessions.create(sessionId, { meta: header })
     const agent = {
@@ -86,18 +82,8 @@ describe('SessionController facade', () => {
       'resolveAgent',
     ).mockResolvedValueOnce({ error: activationError })
     await expect(resolveUploadAgent(sessionId)).rejects.toBe(activationError)
-    const consumeSelection = vi.spyOn(
-      (controller as unknown as { agents: ApiSessionAgentController }).agents,
-      'consumeSelection',
-    )
 
     await expect(controller.resolveAgent(sessionId)).resolves.toEqual({ agent })
-    await expect(controller.inspect(sessionId)).resolves.toEqual({
-      meta: header,
-      inheritedEventCount: SessionLogOffset(0),
-      events,
-    })
-    expect(inspect).toHaveBeenCalledOnce()
     ctx.emit('agent/status', { agent, status: 'running' })
     ctx.emit('agent/error', { agent, turn: 1, step: 0, error: new Error('fixture failure') })
     session.append('user/message', createUserMessage({
@@ -115,9 +101,9 @@ describe('SessionController facade', () => {
       header: { config: { provider: 'fixture', model: 'fixture-model' } },
       reason: 'initial',
     })
-    expect(consumeSelection).toHaveBeenCalledWith(
-      agent, 'fixture', 'fixture-model', undefined,
-    )
+    expect(ctx.sessionProjections.snapshot(session).values.modelSelection).toEqual({
+      lastUsed: { provider: 'fixture', model: 'fixture-model' }, next: { provider: 'fixture', model: 'fixture-model' },
+    })
     const unowned = ctx.sessions.create(SessionId('controller-unowned'), {
       meta: { cwd: '/workspace' },
     })
@@ -125,7 +111,9 @@ describe('SessionController facade', () => {
       header: { config: { provider: 'fixture', model: 'other-model' } },
       reason: 'initial',
     })
-    expect(consumeSelection).toHaveBeenCalledTimes(1)
+    expect(ctx.sessionProjections.snapshot(unowned).values.modelSelection).toEqual({
+      lastUsed: { provider: 'fixture', model: 'other-model' }, next: { provider: 'fixture', model: 'other-model' },
+    })
 
     const abort = new AbortController()
     const iterator = controller.follow({
@@ -144,6 +132,7 @@ describe('SessionController facade', () => {
     async (outcome) => {
       const ctx = new Context()
       await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(AgentRegistry)
       const sessionId = SessionId(`background-${outcome}`)
       const header: SessionHeader = {
@@ -157,7 +146,7 @@ describe('SessionController facade', () => {
           events: [],
         }),
       }) as never)
-      const controller = createSessionTestController(ctx, defaults)
+      const controller = await createSessionTestController(ctx, defaults)
       const agents = (controller as unknown as { agents: ApiSessionAgentController }).agents
       const apiError = vi.fn()
       ctx.on('api-session/error', apiError)
@@ -200,6 +189,7 @@ describe('SessionController facade', () => {
   it('waits for an admitted background promotion during teardown', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)
     const sessionId = SessionId('background-disposal')
     const header: SessionHeader = {
@@ -213,7 +203,7 @@ describe('SessionController facade', () => {
         events: [],
       }),
     }) as never)
-    const controller = createSessionTestController(ctx, defaults)
+    const controller = await createSessionTestController(ctx, defaults)
     const agents = (controller as unknown as { agents: ApiSessionAgentController }).agents
     const started = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()

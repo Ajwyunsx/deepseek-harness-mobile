@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, realpath } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { TextDecoder, promisify } from "node:util";
+import { homedir } from "node:os";
 //#region lib/types/win32.js
 /**
 * Windows security-descriptor helpers for atomic local-file replacement. Koffi loads lazily so
@@ -144,6 +145,18 @@ async function readFileAbortable(absolutePath, verb, signal) {
 /** Opaque version token from high-resolution identity and freshness metadata. */
 function versionOf(info) {
 	return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
+}
+/**
+* Replace a leading `~` with the host user's home directory in a caller-supplied path.
+* `~/` is recognized on every platform and `~\` only on Windows; `~user` and later `~`
+* segments stay literal. The rest of the spelling is kept so parent traversal still resolves physically.
+* @param path - requested path from a model, plugin, or other caller; never a directory entry name.
+* @returns the path with its home prefix replaced, or `path` unchanged.
+*/
+function expandHomePrefix(path) {
+	/* v8 ignore next -- Native Windows tests cover the `~\` prefix; POSIX keeps it literal. */
+	if (path === "~" || path.startsWith("~/") || process.platform === "win32" && path.startsWith("~\\")) return `${homedir()}${path.slice(1)}`;
+	return path;
 }
 /**
 * Anchor a path using native drive semantics and POSIX physical parent traversal.
@@ -853,7 +866,7 @@ var LocalFileSystem = class extends FileSystem {
 	}
 	async resolve(path, opts) {
 		if (opts?.signal?.aborted) throw new FsError("resolve aborted", "FS_ABORTED");
-		const local = await resolveLocalTarget(opts?.cwd ?? this.config.cwd, path);
+		const local = await resolveLocalTarget(opts?.cwd ?? this.config.cwd, expandHomePrefix(path));
 		if (opts?.signal?.aborted) throw new FsError("resolve aborted", "FS_ABORTED");
 		return {
 			targetKey: local.targetKey,
@@ -887,7 +900,7 @@ var LocalFileSystem = class extends FileSystem {
 	async lstat(path, opts, signal) {
 		if (signal?.aborted) throw new FsError("lstat aborted", "FS_ABORTED");
 		if (path.trim().length === 0) throw new FsError("file_path must be a non-empty string", "FS_NOT_FOUND");
-		const info = await probeNoFollow(localDisplayPath(opts?.cwd ?? this.config.cwd, path));
+		const info = await probeNoFollow(localDisplayPath(opts?.cwd ?? this.config.cwd, expandHomePrefix(path)));
 		if (signal?.aborted) throw new FsError("lstat aborted", "FS_ABORTED");
 		if (!info) return void 0;
 		return {

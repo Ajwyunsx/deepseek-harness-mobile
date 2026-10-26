@@ -128,7 +128,10 @@ export function apply(ctx: Context): void {
           const rows = args.action === 'list_plugins' ? await manager.listPlugins() : await manager.listBundles()
           const entries = rows.slice(offset, offset + limit).map(({ meta: _meta, ...row }) =>
             'rows' in row
-              ? { ...row, rows: row.rows.map(({ meta: _rowMeta, ...declared }) => declared) }
+              // GUI listing and update eligibility do not change the tool's management operations.
+              ? (({ updatable: _updatable, listedByDefault: _listedByDefault, ...bundle }) => ({
+                ...bundle, rows: bundle.rows.map(({ meta: _rowMeta, ...declared }) => declared),
+              }))(row)
               : row)
           return JSON.stringify({ entries, total: rows.length,
             nextOffset: offset + entries.length < rows.length ? offset + entries.length : null })

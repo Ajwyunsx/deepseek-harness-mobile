@@ -24,6 +24,17 @@ function bindings(value: PtcBindingFunction) {
 }
 
 describe('persistent Node REPL', () => {
+  it('keeps a snapshot of caller-owned root arrays and rejects changed grants', async () => {
+    const { run, runtime, owner, cwd } = await setup()
+    const roots = [cwd]
+    const policy = { mode: 'danger-full-access' as const, workspaceRoot: cwd, additionalWritableRoots: roots }
+    expect((await run('var retained = 7; retained', { sandboxPolicy: policy })).value).toBe(7)
+    expect((await run('retained', { sandboxPolicy: { ...policy, additionalWritableRoots: [cwd, cwd] } })).value).toBe(7)
+    roots[0] = tmpdir()
+    await expect(run('retained', { sandboxPolicy: policy })).rejects.toThrow('release the retained environment')
+    await runtime.release(owner)
+    expect((await run('typeof retained', { sandboxPolicy: policy })).value).toBe('undefined')
+  })
   it.each([
     'function f() {', '(', '[', '`unfinished',
     'const x = await Promise.resolve(1); return x',
@@ -36,6 +47,14 @@ describe('persistent Node REPL', () => {
     expect(result.error?.message.trim().length).toBeGreaterThan(0)
     if (program.includes('return x')) expect(result.error?.message).toMatch(/return/i)
     expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the environment when an evaluation ends with an unawaited binding call', async () => {
+    const { run } = await setup()
+    const release = Promise.withResolvers<null>()
+    onTestFinished(() => { release.resolve(null) })
+    expect((await run('var kept = 1; void tools.value({}); kept', { bindings: bindings(() => release.promise) })).value).toBe(1)
+    expect((await run('kept')).value).toBe(1)
   })
 
   it('retains declarations, closures, object identity, and imports across evaluations', async () => {
