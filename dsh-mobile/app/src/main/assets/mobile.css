@@ -449,6 +449,7 @@ div[class*="_trigger"] {
      座就下沉出屏或浮到页面中部。fixed 与祖先高度/内边距完全解耦，
      env(safe-area-inset-bottom) 由座自身的 padding-bottom 承担（见上条规则）。
      hero（新对话）页的座在文档流里，保持 dsh 原行为不动 */
+  [data-composer-seat]:not(:has(div[class*="_composerHero"])),
   div[class*="_centerCol"] div[class*="_composerSeat"]:not(:has(div[class*="_composerHero"])) {
     position: fixed !important;
     left: 0 !important;

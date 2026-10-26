@@ -287,11 +287,7 @@ public final class BootstrapInstaller {
                         checkCancelled();
                         // 上次若在 dpkg 配置阶段被中断，直接 install 会报
                         // "dpkg was interrupted"——先修复半配置状态（无可修复时返回 0）
-                        try {
-                            runInContainer(Arrays.asList("/usr/bin/dpkg", "--configure", "-a"), 78, 78);
-                        } catch (Exception e) {
-                            log("dpkg 状态修复未完成（忽略，继续安装）");
-                        }
+                        runInContainer(Arrays.asList("/usr/bin/dpkg", "--configure", "-a"), 78, 78);
                         runInContainer(Arrays.asList("/usr/bin/apt-get",
                                 "-o", "DPkg::Lock::Timeout=180",
                                 "install", "-y", "--no-install-recommends", "python3", "make", "g++",
@@ -403,11 +399,7 @@ public final class BootstrapInstaller {
                 killStaleAptProcesses();
                 runInContainer(Arrays.asList("/usr/bin/apt-get",
                         "-o", "DPkg::Lock::Timeout=180", "update"), 97, 97);
-                try {
-                    runInContainer(Arrays.asList("/usr/bin/dpkg", "--configure", "-a"), 97, 97);
-                } catch (Exception e) {
-                    log("dpkg 状态修复未完成（忽略，继续安装）");
-                }
+                runInContainer(Arrays.asList("/usr/bin/dpkg", "--configure", "-a"), 97, 97);
                 runInContainer(Arrays.asList("/usr/bin/apt-get",
                         "-o", "DPkg::Lock::Timeout=180",
                         "install", "-y", "--no-install-recommends", "openssh-server"), 97, 99);

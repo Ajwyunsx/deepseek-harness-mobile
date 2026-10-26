@@ -86,11 +86,11 @@ function pageHtml(css) {
   ._sidebarRoot_test { padding: 12px; }
   ._sidebarRoot_test._collapsed_test { width: 56px; overflow: hidden; }
   ._sidebarRoot_test._collapsed_test .label { display: none; }
-  ._centerCol_test { display: flex; flex-direction: column; min-height: 0; }
+  #center-col { display: flex; flex-direction: column; min-height: 0; }
   ._header_test { padding: 12px; }
-  ._scrollBody_test { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+  #scroller { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
   .msg { padding: 10px 12px; border-bottom: 1px solid #eee; }
-  ._composerSeat_test { padding-bottom: 8px; position: sticky; bottom: 0; z-index: 7; background: #fff; }
+  [data-composer-seat] { padding-bottom: 8px; position: sticky; bottom: 0; z-index: 7; background: #fff; }
   ._composer_test { margin: 8px 12px; padding: 10px; border: 1px solid #ccd; border-radius: 14px; }
   ._composer_test textarea { width: 100%; height: 44px; border: 0; resize: none; }
 </style></head>
@@ -103,7 +103,7 @@ function pageHtml(css) {
           <button class="_toggle_test" id="sidebar-toggle" aria-label="Collapse sidebar">toggle</button>
         </div>
       </div>
-      <div class="_centerCol_test">
+      <div class="_centerCol_test" id="center-col">
         <div class="_header_test">标题</div>
         <div class="_scrollBody_test" id="scroller" data-conversation-scroll="">
           <div class="_composerSeat_test" data-composer-seat=""><div class="_composer_test"><textarea placeholder="发消息"></textarea></div></div>
@@ -195,6 +195,25 @@ async function restingOverlapPx(page) {
       scrollTop: Math.round(scroller.scrollTop),
     }
   })
+}
+
+async function scenarioNestedCollapsedContent(page) {
+  console.log('\nscenario: collapsed workspace content inside an expanded sidebar')
+  await page.evaluate(() => {
+    const nested = document.createElement('div')
+    nested.id = 'nested-collapsed-workspace'
+    nested.className = '_collapsed_test'
+    document.getElementById('sidebar-root').appendChild(nested)
+  })
+  await page.click('#dsh-mobile-railbtn')
+  await page.waitForTimeout(1800)
+  const result = await page.evaluate(() => ({
+    drawer: document.body.classList.contains('dsh-mobile-drawer'),
+    collapsed: document.getElementById('sidebar-root').classList.contains('_collapsed_test'),
+  }))
+  check(result.drawer && !result.collapsed, 'nested collapsed content does not close the expanded drawer')
+  await page.evaluate(() => document.getElementById('dsh-mobile-drawer-mask').click())
+  await page.waitForTimeout(700)
 }
 
 async function scenarioComposerOverlap(page) {
@@ -375,6 +394,8 @@ async function scenarioStableAttributeHooks(page) {
   await fillMessages(page, 12)
   await page.waitForTimeout(FIT_TICK_MS)
   const result = await overlapPx(page)
+  const position = await page.locator('[data-composer-seat]').evaluate(el => getComputedStyle(el).position)
+  check(position === 'fixed', `data attribute keeps the composer fixed after class renames (${position})`)
   check(result.spacerHeight > 0,
     `spacer still lands via the data attributes (${result.spacerHeight}px)`)
   check(result.overlap <= 0,
@@ -478,9 +499,11 @@ async function main() {
     page.on('pageerror', error => errors.push(String(error)))
     await page.setContent(pageHtml(css))
     await page.addScriptTag({ content: SIDEBAR_TOGGLE_SCRIPT })
+    await page.evaluate(() => document.getElementById('sidebar-root').classList.add('_collapsed_test'))
     await page.addScriptTag({ content: inject })
     await page.waitForTimeout(400)
 
+    await scenarioNestedCollapsedContent(page)
     await scenarioComposerOverlap(page)
     await scenarioColdStartHiddenSeat(page)
     await scenarioSeatGrowsWhileResting(page)
