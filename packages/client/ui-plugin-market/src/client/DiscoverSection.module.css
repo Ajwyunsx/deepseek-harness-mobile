@@ -9,6 +9,7 @@
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -23,6 +24,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.indexMenuName {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .search {
@@ -393,13 +400,22 @@
 
 .sourceForm {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
 }
 
-.grow {
-  flex: 1;
-  min-width: 0;
+.sourceField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.sourceActions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .confirmHead {

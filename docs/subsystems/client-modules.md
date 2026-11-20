@@ -35,6 +35,8 @@ interface WebBootEntry {
   immediately?: boolean
   /** Non-baseline module specifiers this row requests; omitted when it requests none. */
   external?: string[]
+  /** Browser-synced values of the plugin's top-level volatile Config fields, secrets removed; omitted when it has none. */
+  config?: SyncedConfigValues
 }
 ```
 
@@ -93,7 +95,9 @@ Initial publication and HMR derive each row's `rev` from the entry's mtime, ctim
 
 A package joins the table by declaring `dsh.client` (`platform: 'web'`, optional `inject` edges, optional `immediately`) in its package.json and exporting its built bundle at `exports["./client"]`. Each live row resolves from its own Loader specifier and owning-tree `baseUrl`, through the same `loader.internal.resolveSync` implementation that imports its Host face when available. The nearest owning package manifest supplies the browser module id, so relative source and built overlays retain the package identity. Distinct active Loader sources resolving to one package name fail composition; after one source unloads, the surviving source supplies the row without a fiber restart.
 
-Scanning is incremental per package; there is no full-rescan code path. Every cordis `internal/plugin` emission (fiber construction or disposal) marks the fiber's entry name dirty, and a microtask flush reconciles each dirty name against the live loader entries. The activation pass seeds the same dirty set with all current entries and flushes synchronously, so first scan and steady state share one implementation — with opposite failure postures. At activation, a malformed declaration or missing bundle among the already-loaded entries aggregates into one loud `AggregateError` listing every broken package: the fiber FAILS and the boot's fail-loud sweep reports it. In steady state, a broken package logs a warning and must not poison the others.
+Package reconciliation is incremental by Loader entry name. Every Cordis `internal/plugin` emission (fiber construction or disposal) marks the fiber's entry name dirty. Each nonempty flush enumerates all Loader entries once and indexes them by name at flush start; pending names use their indexed entries, including all same-name sources, and missing names use an empty list to remove unloaded sources. Package resolution must not synchronously add or remove Loader entries during reconciliation. Activation seeds all current names and flushes synchronously; later notifications queue a microtask flush.
+
+At activation, malformed declarations, missing bundles, and flush enumeration failures aggregate into a composition error: the fiber fails and boot reports it. In steady state, package failures log warnings without preventing other names from being reconciled. An enumeration failure consumes the failed batch, logs one warning, and leaves package state and the published graph unchanged; each affected name waits for another notification before retrying.
 
 Each reconciliation reads the package manifest and the bundle metadata again. A fiber restart from the same source that finds the same declaration and bundle metadata keeps its row and rev and reads no bundle bytes; a changed declaration, client export, or bundle is published by that reconciliation. A bundle rebuilt without an entry restart reaches the graph through `rebuilt()`.
 
@@ -137,10 +141,18 @@ The web plugin table service: incremental `dsh.client` scan + wire composition +
 
 ```ts cordis-catalog
 /**
- * Current composed entry graph (stable object between changes).
- * @returns the graph served as `window.__DSH_BOOT__`.
+ * Current composed entry graph (stable object between changes), carrying the configured synced values.
+ * @returns the graph served as the owner's `window.__DSH_BOOT__`.
  */
 graph(): WebBootGraph
+
+/**
+ * The current graph as one Peer may see it: the owner receives the configured synced values, and every other Peer
+ * receives each row's schema defaults in their place.
+ * @param principal - the Peer's principal; undefined for the owner or an in-process caller.
+ * @returns the graph served to that Peer at first render and in plugin-events frames.
+ */
+graphFor(principal: Principal | undefined): WebBootGraph
 
 /**
  * Absolute path of an entry's client bundle.
@@ -192,13 +204,36 @@ rebuilt(id: string): string | undefined
 onRebuilt(listener: (id: string, rev: string) => void): () => void
 
 /**
- * Fires after any flush that recomposed the graph (row added/removed, or a
- * rebuilt rev change). Pull model: listeners re-read {@link graph}.
+ * Fires after the graph's rows or rev change: a flush that recomposed the
+ * graph (row added/removed, or a rebuilt rev change), or a republication of
+ * synced configuration alone, which leaves the batch artifacts unchanged.
+ * Pull model: listeners re-read {@link graph}.
  * @param listener - notified with no payload.
  * @returns the unsubscriber.
  */
 onGraphChanged(listener: () => void): () => void
 ```
 
+Types: [Principal](typert.md)
+
 Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)
+
+<a id="ctxconfig--syncedconfigservice"></a>
+
+### `ctx.config` — `SyncedConfigService`
+
+Read-only access to other packages' synced Config; a plugin receives its own through `apply`.
+
+```ts cordis-catalog
+/**
+ * The synced Config object of a package's current plugin activation, as that activation's `apply` received it. Each
+ * activation receives a new object, so the result changes when the plugin is replaced. The caller states the
+ * package's shared Config type.
+ * @param packageName - package name of the graph row.
+ * @returns the object, or undefined while no activation of the package is running.
+ */
+resolveConfigByPackage<C>(packageName: string): SyncedConfig<C> | undefined
+```
+
+Source: [`packages/client/config/src/types.ts`](../../packages/client/config/src/types.ts)
 <!-- END GENERATED cordis-surface -->

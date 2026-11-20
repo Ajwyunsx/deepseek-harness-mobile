@@ -10,6 +10,7 @@ import { WebError } from '@deepseek-ai/dsh-web'
 import type { WebFetchBody, WebFetchProvider, WebFetchRequest, WebFetchResult } from '@deepseek-ai/dsh-web'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { Response } from 'undici'
+import { classifyTransportFailure } from './transport-failure.ts'
 import { classifyContentType, decoderForCharset, isSameOrigin, parseCharset, validateFetchUrl } from './policy.ts'
 
 /** Resolved provider limits (the plugin's schemastery Config supplies defaults). */
@@ -32,6 +33,17 @@ export const LOCAL_FETCH_PROVIDER_ID = 'http'
 /** The anonymous HTTP(S) fetch provider. */
 export class HttpFetchProvider implements WebFetchProvider {
   readonly id = LOCAL_FETCH_PROVIDER_ID
+  /** Picker description: what this provider suits and what it costs or cannot do. */
+  readonly description: NonNullable<WebFetchProvider['description']> = {
+    en: 'Free, and can reach intranet and local addresses. Does not support pages that need JavaScript or sign-in, or PDFs.',
+    zh: '免费，可访问内网和本机。不支持需要 JavaScript 或登录的页面，也不支持 PDF。',
+    ja: '無料で、イントラネットやローカルのアドレスにもアクセスできます。JavaScript やログインが必要なページ、PDF には対応しません。',
+    es: 'Gratis y puede acceder a direcciones de la intranet y locales. No admite páginas que requieran JavaScript o inicio de sesión, ni PDF.',
+    fr: 'Gratuit, et accède aux adresses intranet et locales. Ne prend pas en charge les pages nécessitant JavaScript ou une connexion, ni les PDF.',
+    de: 'Kostenlos und erreicht auch Intranet- und lokale Adressen. Keine Seiten, die JavaScript oder eine Anmeldung erfordern, und keine PDFs.',
+    ru: 'Бесплатно, доступны адреса интрасети и локальные адреса. Не поддерживает страницы, требующие JavaScript или входа, а также PDF.',
+    pt: 'Gratuito e acessa endereços da intranet e locais. Não oferece suporte a páginas que exigem JavaScript ou login, nem a PDFs.',
+  }
 
   /** @param limits - resolved transport and response limits. */
   constructor(private readonly limits: HttpFetchLimits) {}
@@ -121,9 +133,7 @@ export class HttpFetchProvider implements WebFetchProvider {
       throw new WebError(`unsupported content type "${contentType ?? 'unknown'}"`, 'WEB_UNSUPPORTED_CONTENT_TYPE')
     }
 
-    // Resolve the decoder BEFORE reading the body so an unsupported charset
-    // fails without consuming the stream — but cancel the body on that failure
-    // so the socket does not leak (matching the unsupported-content-type path).
+    // Reject unsupported declarations before reading, releasing the response stream.
     let decoder: TextDecoder
     try {
       decoder = decoderForCharset(parseCharset(contentType))
@@ -132,7 +142,17 @@ export class HttpFetchProvider implements WebFetchProvider {
       throw error
     }
     const { bytes, truncatedByBytes } = await this.readCapped(response, signal)
-    const decoded = decoder.decode(bytes)
+    let decoded: string
+    try {
+      // Only a real byte-cap truncation permits an incomplete UTF-8 suffix.
+      decoded = decoder.decode(bytes, { stream: decoder.fatal && truncatedByBytes })
+    } catch (error: unknown) {
+      throw new WebError(
+        'response body is not valid UTF-8 for the malformed charset declaration',
+        'WEB_UNSUPPORTED_CONTENT_TYPE',
+        { cause: error },
+      )
+    }
     const truncatedByChars = decoded.length > this.limits.maxBodyChars
     const content = truncatedByChars ? decoded.slice(0, this.limits.maxBodyChars) : decoded
     const body: WebFetchBody = kind === 'html' ? { kind: 'html', content } : { kind: 'text', content }
@@ -230,11 +250,12 @@ function resolveRedirect(location: string, base: URL): URL {
  * recovering OUR reason means our timeout fired (`WEB_FETCH_TIMEOUT`); any other
  * abort — an upstream cancel, or a foreign/outer deadline's timeout under
  * nesting — is `WEB_ABORTED`; a throw with the signal NOT aborted is a
- * transport/network failure (`WEB_PROVIDER_ERROR`).
+ * transport failure, classified by {@link classifyTransportFailure}.
  */
 function translateAbortOrNetwork(error: unknown, signal: AbortSignal): WebError {
   const timeout = timeoutOf(signal, 'WEB_FETCH_TIMEOUT')
   if (timeout !== undefined) return new WebError('web fetch timed out', 'WEB_FETCH_TIMEOUT', { cause: timeout })
   if (signal.aborted) return new WebError('web fetch aborted', 'WEB_ABORTED', { cause: error })
-  return new WebError(`web fetch failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+  const failure = classifyTransportFailure(error)
+  return new WebError(`web fetch failed: ${failure.message}`, failure.code, { cause: error })
 }

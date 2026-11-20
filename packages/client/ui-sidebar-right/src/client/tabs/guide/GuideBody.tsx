@@ -9,8 +9,9 @@
  * cannot be outvoted by accident.
  *
  * The shipped guide is a muted compass over the pinned entry capsules every
- * registered type contributed, centred in the body, with no heading, as a
- * browser start page shows its doors without a caption. While at most four
+ * registered type contributed, centred in the body (scrolling from the top when
+ * taller than the pane), with no heading, as a browser start page shows its
+ * doors without a caption. While at most four
  * capsules are visible, a capsule with a description shows it under the title;
  * a longer list drops every description to stay light. A More card follows
  * while `sidebar.right.tab.guide.actions` has registrations.
@@ -134,6 +135,11 @@ export function GuideBody({
   const entries = useGuideEntries(entries => entries)
   const unpinned = useEntryPins(ids => ids)
   const hasEntryActions = useEntryActions(registered => registered)
+  // A new page replaces the guide; a page already in its pane is revealed, and the guide then closes itself.
+  const open = (kind: string): void => {
+    tab.actions.openTab(kind, { replaceTab: true })
+    tab.actions.close()
+  }
   const visibleEntries = entries.filter(entry => entry.kind === FIXED_GUIDE_KIND || !unpinned.includes(guideEntryId(entry)))
   const options = {
     hookContext: useTabInfo,
@@ -148,7 +154,7 @@ export function GuideBody({
           }, {
             entryKey: entry.providerId, hookContext: useTabInfo,
             fallback: <EntryBox entry={entry} described={described} shortcut={shortcuts.find(shortcut => shortcut.id === entry.commandId)}
-              onPick={(selected) => { tab.actions.openTab(selected.kind, { replaceTab: true }) }} />,
+              onPick={(selected) => { open(selected.kind) }} />,
           })}
         </div>
       })}
@@ -159,7 +165,7 @@ export function GuideBody({
             .map(entry => ({ id: guideEntryId(entry), label: entry.title(), pinned: !unpinned.includes(guideEntryId(entry)) }))}
           onOpen={(id) => {
             const entry = entries.find(candidate => guideEntryId(candidate) === id)
-            if (entry !== undefined) tab.actions.openTab(entry.kind, { replaceTab: true })
+            if (entry !== undefined) open(entry.kind)
           }}
           onPinnedChange={setPinned}
           renderSlot={renderSlot}

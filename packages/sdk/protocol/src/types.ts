@@ -9,7 +9,8 @@
  */
 
 import type { ContentBlock, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { CommandExecution } from '@deepseek-ai/dsh-commands/types'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentStopReason } from '@deepseek-ai/dsh-subagent'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 
@@ -44,6 +45,9 @@ export interface SdkUserQuestionRequest {
 /** Host answers, one item per original question id. */
 export type SdkUserQuestionAnswer = AskUserQuestionAnswer
 
+/** Host answers or an explicit user dismissal; dismissal never means approval. */
+export type SdkUserQuestionResult = SdkUserQuestionAnswer | { cancelled: true }
+
 /** Runtime cancellation of a pending host question. Late answers are ignored. */
 export interface SdkUserQuestionCancelled {
   /** Identity from the original question request. */
@@ -54,7 +58,7 @@ export interface SdkUserQuestionCancelled {
 
 /** Runtime-to-host requests, handled independently of outbound Session requests. */
 export interface HarnessSdkHostRequestMap {
-  'user-question/ask': { params: SdkUserQuestionRequest; result: SdkUserQuestionAnswer }
+  'user-question/ask': { params: SdkUserQuestionRequest; result: SdkUserQuestionResult }
 }
 
 /** Wire-stable server identity returned by initialization. */
@@ -78,6 +82,8 @@ export interface SdkEncodedImageBlock {
   data: string
   /** Declared raster MIME type, verified during admission. */
   mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  /** Optional display name; never interpreted as a filesystem path. */
+  name?: string
 }
 
 /** SDK prompt input: ordinary durable blocks plus inline images awaiting admission. */
@@ -89,10 +95,32 @@ export interface SessionPromptResult {
   messageId: string
 }
 
+/** Content submitted through the SDK's ordinary-input and slash-command entry. */
+export interface SessionQueryParams {
+  /** SDK-owned Session identity; an unknown id creates its Agent. */
+  sessionId: SessionId
+  /** Ordered prompt blocks; a native command occupies its only text block and may accompany encoded images. */
+  contentBlocks: SdkPromptContentBlock[]
+}
+
+/**
+ * A prompt's enqueue receipt or a settled native command; neither means all Session work ended.
+ * Command lifecycle notifications precede the command response on the same stream.
+ * High-level command activity ends with its correlated session.query.completed notification.
+ */
+export type SessionQueryResult =
+  | ({ kind: 'prompt' } & SessionPromptResult)
+  | { kind: 'command'; execution: CommandExecution }
+
+/** Native command outcome, including its logged lifecycle identity. */
+export type { CommandExecution }
+
 /** Restore a persisted session without enqueueing a prompt. */
 export interface SessionResumeParams {
   /** Persisted session identity; missing or already owned sessions are rejected. */
   sessionId: string
+  /** Configured permission preset to persist before execution; omission retains saved permissions. */
+  permissionMode?: string
 }
 
 /** Wait for an existing SDK session and its managed descendants to finish. */
@@ -107,7 +135,7 @@ export interface SessionWorkingDirectoryParams {
   sessionId: string
 }
 
-/** Change one Session's effective directory without changing its origin or permissions. */
+/** Change one Session's effective directory without changing its origin; the workspace-write boundary follows it. */
 export interface SessionWorkingDirectorySetParams extends SessionWorkingDirectoryParams {
   /** Directory to enter; relative paths resolve against the Session's current directory. */
   path: string
@@ -169,6 +197,13 @@ export interface HarnessSdkNotificationMap {
   'user-question.cancelled': SdkUserQuestionCancelled
   'session.event': SessionEventNotification
   'session.status': SessionStatusNotification
+  /** Completion of a command query, including model activity and automatic goal rounds it starts. */
+  'session.query.completed': {
+    sessionId: SessionId
+    commandId: CommandExecution['commandId']
+    finalResponse: string
+    finishReason: string
+  }
   'subagent.started': SubagentStartedNotification
   'subagent.finished': SubagentFinishedNotification
 }
@@ -177,6 +212,7 @@ export interface HarnessSdkNotificationMap {
 export interface HarnessSdkRequestMap {
   'initialize': { params: InitializeParams; result: InitializeResult }
   'session/prompt': { params: SessionPromptParams; result: SessionPromptResult }
+  'session/query': { params: SessionQueryParams; result: SessionQueryResult }
   'session/resume': { params: SessionResumeParams; result: Record<string, never> }
   'session/wait': { params: SessionWaitParams; result: Record<string, never> }
   'session/working-directory/get': { params: SessionWorkingDirectoryParams; result: SessionWorkingDirectoryResult }

@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
@@ -12,10 +12,11 @@ import {
   seedSession, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
 import { connectFreshWorkspace } from './support.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 const root = fileURLToPath(new URL('./expected/shortcuts-workspace', import.meta.url))
 const seed = fileURLToPath(new URL('../../../snapshots/web/seeded-history/session.v3.jsonl', import.meta.url))
-const sourceId = SessionId('shortcuts-workspace-source')
+const sourceId = brandString<SessionId>('shortcuts-workspace-source')
 const mode = webSnapshotMode()
 
 describe.skipIf(mode === 'record')('web e2e: workspace shortcuts', () => {
@@ -178,9 +179,14 @@ describe.skipIf(mode === 'record')('web e2e: workspace shortcuts', () => {
     await expect.poll(() => launched).toEqual([{ app: 'vscode', path: workspace.path }])
 
     await page.keyboard.press('Meta+Alt+P')
-    const files = page.locator('[data-files-state="tree"]')
+    const files = page.locator('[data-files-page]')
     await files.locator('[data-files-row="empty"]').waitFor()
+    // The directory opener sits in the files page's header, above the tree.
     const opener = files.locator('[data-open-target="directory"]')
+    const tools = files.locator('[data-files-reload], [data-files-search-toggle], [data-open-target="directory"] button')
+    expect((await tools.evaluateAll(elements => elements.map(element => element.hasAttribute('data-files-reload')
+      ? 'reload' : element.hasAttribute('data-files-search-toggle') ? 'search' : 'open'))).slice(0, 3))
+      .toEqual(['reload', 'search', 'open'])
     await opener.getByRole('button', { name: 'Open in VS Code', exact: true }).click()
     await expect.poll(() => launched).toEqual([
       { app: 'vscode', path: workspace.path }, { app: 'vscode', path: workspace.path },
@@ -196,7 +202,7 @@ describe.skipIf(mode === 'record')('web e2e: workspace shortcuts', () => {
     ])
     await expect.poll(() => opener.getAttribute('data-state')).toBe('idle')
     await compareOrRefreshGolden(join(root, 'files-open.expected.md'),
-      await captureStableAria(page, '[data-files-state="tree"]', scaffold.workspaceCwd), mode)
+      await captureStableAria(page, '[data-files-page]', scaffold.workspaceCwd), mode)
     await opener.getByRole('button', { name: 'More ways to open', exact: true }).click()
     await page.getByRole('menuitem', { name: 'Finder (default)', exact: true }).waitFor()
     await page.keyboard.press('Escape')
@@ -280,7 +286,7 @@ it.skipIf(mode === 'record').each([
   const scaffold = await launchWebScaffold({ developerTools: false })
   let browser: Browser | undefined
   try {
-    await seedSession(scaffold, await readFile(seed, 'utf8'), SessionId('shortcut-defaults-source'))
+    await seedSession(scaffold, await readFile(seed, 'utf8'), brandString<SessionId>('shortcut-defaults-source'))
     browser = await chromium.launch()
     const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 1000 } })
     await context.addInitScript((value) => { Object.defineProperty(navigator, 'platform', { value }) }, platform)

@@ -8,7 +8,7 @@
  * the page declares.
  */
 
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { PluginInstallFailureKind, Registry } from '@deepseek-ai/dsh-api-remotes/client'
 import {
@@ -17,14 +17,17 @@ import {
   IconDownloadOutlineRegular, IconInfoOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular,
   IconWarningOutlineRegular, Input, Menu, MenuItemButton, Modal, pointerModality,
   PluginArtworkDefault, PluginArtworkLoop, PluginArtworkSearch, PluginArtworkSubagent, PluginArtworkTerminal,
-  SegmentedTabs, StateDot, Switch, Tag, TerminalBlock, Toast, Tooltip, useAnchoredPosition, useDismissOnOutsidePointer,
+  SegmentedTabs, StateDot, Switch, Tag, TerminalBlock, Toast, Tooltip, useDismissOnOutsidePointer,
   type IconProps, type StateDotState, type TerminalBlockLabels,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ClientEntryState } from '@deepseek-ai/dsh-client-modules/client'
+import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type { InjectFace, PropsLocale, PropsRenderFactories, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import { EXTENSION_BUNDLES, HIDDEN_BUNDLES, MORE_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
+import { localizedValues, TextSearchIndex } from '@deepseek-ai/dsh-util-text-search'
 import type { createNavigationStore } from './navigation-store.ts'
 import type { PluginHeaderLayoutFace } from './header-scroll.ts'
-import { rowConfigKey, type OfficialItem } from './config-ledger.ts'
+import { rowConfigKey, type OfficialItem, type SettingsSectionItem } from './config-ledger.ts'
 import { INSTALL_GIT_EXAMPLE, INSTALL_PATH_EXAMPLE, type PluginManagerLocaleKey } from './locales.ts'
 import {
   bundleBusy, asksMirror, githubRecoveryRegistry, isInstallPending, offeredRegistries, rowKey, updateCandidate,
@@ -36,6 +39,7 @@ import type { PluginPackageRef, PluginRowRef, PluginsSubject } from './slot-cont
 import type { ConfigPageForm } from './slot-contract.ts'
 import { UpdateDialog, VersionSection } from './versions.tsx'
 import { BundleDetailSection } from './BundleDetailSection.tsx'
+import { ClientSyncNotice } from './ClientSyncNotice.tsx'
 import css from './PluginManagerPage.module.css'
 
 /** Full component props assembled by the main slot renderer. */
@@ -47,12 +51,22 @@ export type PluginManagerPageProps =
     | 'plugins.add.actions' | 'plugins.tab'
     | 'plugins.detail.actions' | 'plugins.detail.badge' | 'plugins.detail.section'
   >
+  & PropsRenderFactories
   & InjectFace<PluginManagerFace & PluginHeaderLayoutFace>
+  & InjectFace<ClientSyncFace>
   & PropsStore<ReturnType<typeof createNavigationStore>>
+
+/** This page's client plugin synchronization, read from the page's module system. */
+export interface ClientSyncFace {
+  readonly hooks: { readonly clientSync: ObservableSnapshot<ClientEntryState> }
+  /** Retry the latest client graph without changing the Host composition. */
+  readonly retryClient: () => void
+}
 
 /** The page's slot renderer, narrowed to the configuration slots. */
 type RenderConfig = PluginManagerPageProps['renderSlot']
 type ResolveText = PluginManagerFace['resolveText']
+type RenderFactory = PluginManagerPageProps['renderFactorySlot']
 
 type RowPhase = NonNullable<PackageRow['phase']>
 
@@ -98,6 +112,18 @@ function AddPluginMenu({ t, disabled, openInstall, renderSlot }: {
 
 /** How long the list marks a package an install just enabled. */
 const HIGHLIGHT_MS = 2_400
+
+/**
+ * Whether any plugin row this bundle's patch declares is running.
+ *
+ * A default-hidden bundle's rows may run without the profile selecting it, for example through
+ * `cordis.patch.yml`; that run state is the effective enablement the lists offer.
+ * @param pkg - the bundle as the Host reports it.
+ * @returns whether at least one declared row runs.
+ */
+function rowsRunning(pkg: PackageView): boolean {
+  return pkg.rows.some(row => row.enabled)
+}
 
 /**
  * Whether the main list shows an official optional bundle: any bundle outside `MORE_BUNDLES`, and any held-back one the profile enabled.
@@ -251,6 +277,11 @@ function MetadataError({ error, t }: { readonly error: string | undefined; reado
   return error === undefined ? null : <p className={css.reason} role="status" data-package-meta-error>{t('metadataError', { error })}</p>
 }
 
+/** A failed component keeps its current Host diagnostic beside its controls. */
+function RuntimeError({ error, t }: { readonly error: string | undefined; readonly t: Translate }): ReactNode {
+  return error === undefined ? null : <p className={css.reason} role="status" data-plugin-runtime-error>{t('reasonLabel')}: {error}</p>
+}
+
 /**
  * A pack's rows as a list in the order the pack declares them: a state dot,
  * the row id, one line saying its state, a configure control for a row that
@@ -265,10 +296,12 @@ function RowsSection({ rows, t, resolveText, toggle, configure }: {
   readonly configure?: RowConfigure | undefined
 }): ReactNode {
   const [filter, setFilter] = useState('')
-  const query = filter.trim().toLowerCase()
-  const localized = rows.map(row => ({ row, ...rowText(row, resolveText) }))
-  const shown = query === '' ? localized : localized.filter(({ row, title, description }) =>
-    [title, description, row.rowId, row.moduleName].some(value => value?.toLowerCase().includes(query)))
+  // Rows display one language; matching covers every language a value carries.
+  const rowIndex = useMemo(() => new TextSearchIndex(rows, row => ({
+    fuzzy: [row.rowId, row.moduleName, ...localizedValues(row.meta?.title)],
+    substring: localizedValues(row.meta?.description),
+  })), [rows])
+  const shown = rowIndex.search(filter).map(row => ({ row, ...rowText(row, resolveText) }))
   return (
     <section className={css.detailSection} data-plugin-rows>
       <div className={css.sectionHead}>
@@ -327,6 +360,7 @@ function RowsSection({ rows, t, resolveText, toggle, configure }: {
                     />}
                 </div>
                 <MetadataError error={row.meta?.error} t={t} />
+                <RuntimeError error={row.diagnostic} t={t} />
               </li>
             ))}
           </ul>
@@ -392,7 +426,8 @@ function EnableSwitch({ pkg, title, t, busy, onSetEnabled }: {
       <Switch
         checked={pkg.enabled}
         label={t('enableToggle', { name: title })}
-        disabled={busy || pkg.readOnlyReason !== undefined || (!pkg.enabled && pkg.error !== undefined && !(pkg.availability === 'missing' && pkg.installTarget !== undefined))}
+        disabled={busy || pkg.readOnlyReason !== undefined || (!pkg.enabled && pkg.error !== undefined
+          && (pkg.error.code === 'unsupported-platform' || !(pkg.availability === 'missing' && pkg.installTarget !== undefined)))}
         {...pkg.readOnlyReason === undefined ? {} : { title: managementText({ code: pkg.readOnlyReason }, t) }}
         onChange={onSetEnabled}
       />
@@ -400,10 +435,28 @@ function EnableSwitch({ pkg, title, t, busy, onSetEnabled }: {
   )
 }
 
-/** The status one card carries: running, off, or a problem the Host reported. */
-function packageStatus(pkg: PackageView): 'running' | 'disabled' | 'problem' {
-  if (pkg.error !== undefined) return 'problem'
+/** The status one card carries: running, off, not running because the Host skipped a selected bundle's layer, or another problem. */
+type PackageStatus = 'running' | 'disabled' | 'not-running' | 'problem'
+
+/** The tag each status shows beside the title on a card and on its page; running and off show none. */
+const STATUS_TAG_KEYS = {
+  'running': undefined,
+  'disabled': undefined,
+  'not-running': 'statusNotRunning',
+  'problem': 'statusProblem',
+} satisfies Record<PackageStatus, PluginManagerLocaleKey | undefined>
+
+/** A selected bundle the Host reports an error for is not running when none of its rows has a live entry. */
+function packageStatus(pkg: PackageView): PackageStatus {
+  if (pkg.enabled && pkg.error !== undefined && pkg.rows.every(row => row.entryId === undefined)) return 'not-running'
+  if (pkg.error !== undefined || (pkg.enabled && pkg.rows.some(row => row.phase === 'failed'))) return 'problem'
   return pkg.enabled ? 'running' : 'disabled'
+}
+
+/** The danger tag a status carries. */
+function StatusTag({ status, t }: { readonly status: PackageStatus; readonly t: Translate }): ReactNode {
+  const key = STATUS_TAG_KEYS[status]
+  return key === undefined ? null : <Tag className={css.statusTag} tone="danger">{t(key)}</Tag>
 }
 
 /** The head every card shares: the artwork, the name that opens the page beside its tags, its one-liner, and what sits at the end. */
@@ -492,9 +545,9 @@ function versionUpdate(check: VersionCheck | undefined): string | undefined {
   return check?.phase === 'done' ? updateCandidate(check.list)?.version : undefined
 }
 
-/** The list toolbar's sentence about the last update check of every updatable package. */
+/** The list toolbar's sentence about the last update check of every registry package. */
 function updatesNote(packages: readonly PackageView[], versions: PluginManagerState['versions'], t: Translate): { text: string; tone?: 'info' | 'error' } | undefined {
-  const checks = packages.filter(pkg => pkg.updatable).map(pkg => versions[pkg.name])
+  const checks = packages.filter(pkg => pkg.update === 'registry').map(pkg => versions[pkg.name])
   if (checks.length === 0 || checks.some(check => check === undefined || check.phase === 'checking')) return undefined
   const available = checks.filter(check => versionUpdate(check) !== undefined).length
   if (available > 0) return { text: t('updatesAvailable', { count: String(available) }), tone: 'info' }
@@ -510,7 +563,10 @@ function updateAvailable(pkg: PackageView): boolean {
     || ((target.spec.startsWith('link:') || pkg.source?.startsWith('link:') === true) && pkg.source !== target.spec)
 }
 
-/** One package as a card that opens its page: its name, its one-liner, its tags, and its bundle switch. */
+/**
+ * One package as a card that opens its page: its name, its one-liner, its tags, its bundle switch, and why the Host
+ * skipped it or does not support its platform.
+ */
 function PackageCard({ pkg, t, resolveText, busy, highlighted, newer, onOpen, onSetEnabled }: {
   readonly pkg: PackageView
   /** The newer registry version a version check offers. */
@@ -539,7 +595,7 @@ function PackageCard({ pkg, t, resolveText, busy, highlighted, newer, onOpen, on
         tags={(
           <>
             {beta ? <Tag className={css.statusTag} tone="info">{t('statusBeta')}</Tag> : null}
-            {status === 'problem' ? <Tag className={css.statusTag} tone="danger">{t('statusProblem')}</Tag> : null}
+            <StatusTag status={status} t={t} />
             {pkg.availability === 'missing' ? <Tag className={css.statusTag}>{t(pkg.installed ? 'statusMissingFiles' : 'statusNotInstalled')}</Tag> : null}
             {updateAvailable(pkg) || newer !== undefined ? <Tag className={css.statusTag} tone="info">{t('statusUpdateAvailable')}</Tag> : null}
           </>
@@ -548,6 +604,10 @@ function PackageCard({ pkg, t, resolveText, busy, highlighted, newer, onOpen, on
         end={<EnableSwitch pkg={pkg} title={title} t={t} busy={busy} onSetEnabled={onSetEnabled} />}
       />
       <MetadataError error={pkg.meta?.error} t={t} />
+      {/* The card names an incompatibility without its requirement list; the page lists them. */}
+      {pkg.error !== undefined && (status === 'not-running' || pkg.error.code === 'unsupported-platform')
+        ? <p className={css.reason} role="status">{managementText({ ...pkg.error, incompatible: [] }, t)}</p>
+        : null}
     </li>
   )
 }
@@ -630,14 +690,17 @@ function ItemDetail({ item, t, onBack, renderSlot, form }: {
  * A row's configuration page keeps its technical identity beside local package
  * text and the form supplied by its configuration entry.
  */
-function RowDetail({ pkg, row, t, resolveText, onBack, renderSlot, form }: {
+function RowDetail({ pkg, row, t, resolveText, onBack, renderSlot, renderFactory, form, sections }: {
   readonly pkg: PackageView
   readonly row: PackageRow
   readonly t: Translate
   readonly resolveText: ResolveText
   readonly onBack: () => void
   readonly renderSlot: RenderConfig
+  readonly renderFactory: RenderFactory
   readonly form: ConfigPageForm | undefined
+  /** The settings pages the row's module registered, shown when the row registers no configuration of its own. */
+  readonly sections: readonly SettingsSectionItem[]
 }): ReactNode {
   const { title } = packageText(pkg, resolveText)
   const { title: rowTitle, description } = rowText(row, resolveText)
@@ -662,8 +725,10 @@ function RowDetail({ pkg, row, t, resolveText, onBack, renderSlot, form }: {
         <p className={css.detailDesc}>{description ?? renderSlot('plugins.row.config', { view: 'summary' }, { entryKey: key })}</p>
       </div>
       <MetadataError error={row.meta?.error} t={t} />
+      <RuntimeError error={row.diagnostic} t={t} />
       <div className={css.detailSections} data-plugin-config>
         {renderSlot('plugins.row.config', { view: 'page', form }, { entryKey: key })}
+        {sections.map(section => <Fragment key={section.id}>{renderFactory('settings.section.view', { id: section.id, close: onBack })}</Fragment>)}
         {renderSlot('plugins.detail.section', { subject })}
       </div>
     </div>
@@ -673,13 +738,13 @@ function RowDetail({ pkg, row, t, resolveText, onBack, renderSlot, form }: {
 /**
  * One package's page: the crumb back to the list; its icon with its switch
  * and, for a package the profile installed or a selection the Host can remove, uninstall; its title beside its
- * version tag, its beta tag, and its problem tag; the package name the title
+ * version tag, its beta tag, and its problem or not-running tag; the package name the title
  * stands for; its one-liner; the Host's problem when it reports one; the
  * configuration the bundle registered for itself; its rows with their switches
- * and configure controls; and where it comes from.
+ * and configure controls, unless the Host reports an error and no rows; and where it comes from.
  */
 function PackageDetail({
-  pkg, t, resolveText, busy, rowBusy, configured, configure, renderSlot, inMore, versions, detail,
+  pkg, t, resolveText, busy, rowBusy, configured, configure, sections, renderSlot, renderFactory, inMore, versions, detail,
   onBack, onSetEnabled, onUninstall, onUpdate, onSetRowEnabled, onEnsureVersions, onCheckVersions, onUpdateVersion,
 }: {
   readonly pkg: PackageView
@@ -695,7 +760,13 @@ function PackageDetail({
   /** Whether the bundle registered a configuration of its own. */
   readonly configured: boolean
   readonly configure: RowConfigure
+  /**
+   * The settings pages the bundle's own package registered, shown when the bundle has no configuration and no listed
+   * row's module is that package.
+   */
+  readonly sections: readonly SettingsSectionItem[]
   readonly renderSlot: RenderConfig
+  readonly renderFactory: RenderFactory
   readonly inMore: boolean
   readonly onBack: () => void
   readonly onSetEnabled: (enabled: boolean) => void
@@ -758,7 +829,7 @@ function PackageDetail({
           <h3 className={css.detailTitle}>{title}</h3>
           {pkg.version === undefined ? null : <Tag className={css.versionTag} tone="neutral">{t('versionTag', { version: pkg.version })}</Tag>}
           {beta ? <Tag className={css.statusTag} tone="info">{t('statusBeta')}</Tag> : null}
-          {status === 'problem' ? <Tag className={css.statusTag} tone="danger">{t('statusProblem')}</Tag> : null}
+          <StatusTag status={status} t={t} />
           {pkg.availability === 'missing' ? <Tag className={css.statusTag}>{t(pkg.installed ? 'statusMissingFiles' : 'statusNotInstalled')}</Tag> : null}
           {updateAvailable(pkg) || newer !== undefined ? <Tag className={css.statusTag} tone="info">{t('statusUpdateAvailable')}</Tag> : null}
           {renderSlot('plugins.detail.badge', { subject })}
@@ -778,7 +849,13 @@ function PackageDetail({
             </section>
           )
           : null}
-        {pkg.availability === 'missing' ? null : (<RowsSection
+        {sections.map(section => (
+          <section key={section.id} className={css.detailSection} data-plugin-config>
+            {renderFactory('settings.section.view', { id: section.id, close: onBack })}
+          </section>
+        ))}
+        {/* A Host error with no rows can mean the Host never read the patch, so the page does not claim the bundle has no components. */}
+        {pkg.availability === 'missing' || (pkg.error !== undefined && pkg.rows.length === 0) ? null : (<RowsSection
           rows={pkg.rows}
           t={t}
           resolveText={resolveText}
@@ -923,7 +1000,9 @@ function failureText(failure: InstallState['failure'], t: Translate, install?: P
   }
   if (failure.kind !== undefined) return t(FAILURE_KIND_KEYS[failure.kind])
   if (failure.code !== undefined) return managementText({ code: failure.code, diagnostic: failure.reason }, t)
-  return failure.reason === '' ? t('installFailureGeneric') : failure.reason
+  if (failure.reason !== '') return failure.reason
+  // An enabled install that failed applying the bundle names that step, never the install command it already finished.
+  return failure.stage === 'enable' && failure.enabled === true ? t('installFailedEnabling') : t('installFailureGeneric')
 }
 
 interface SubjectLines {
@@ -1020,13 +1099,10 @@ function InstallDialog({
   const registryShown = install.registryOpen && phase === 'idle'
   const specComposition = useInstallComposition(install.open && phase === 'idle')
   const registryComposition = useInstallComposition(install.open && registryShown)
-  const registryPosition = useAnchoredPosition({
-    open: registryShown, anchorRef: registryToggleRef, panelRef: registryPanelRef, align: 'end', gap: 6, margin: 12,
-  })
-  const registryReady = registryShown && registryPosition !== null
+  const registryAnchorName = `--dsh-registry-${registryId.replaceAll(':', '')}`
   useEffect(() => {
-    if (registryReady && install.registryError) registryCustomRef.current?.focus()
-  }, [registryReady, install.registryError])
+    if (registryShown && install.registryError) registryCustomRef.current?.focus()
+  }, [registryShown, install.registryError])
   // The hook only ever asks to close.
   useDismissOnOutsidePointer(registryToggleRef, registryShown, onToggleRegistry, registryPanelRef)
   useEffect(() => {
@@ -1176,6 +1252,7 @@ function InstallDialog({
             </button>
             <button
               ref={registryToggleRef}
+              style={{ anchorName: registryAnchorName }}
               type="button"
               className={css.registryToggle}
               aria-expanded={install.registryOpen}
@@ -1225,7 +1302,7 @@ function InstallDialog({
                 ref={registryPanelRef}
                 id={registryId}
                 className={css.registry}
-                style={registryPosition ?? { visibility: 'hidden', left: 0, top: 0 }}
+                style={{ positionAnchor: registryAnchorName }}
                 data-install-registry
                 aria-label={t('registryLegend')}
                 onKeyDown={(event) => {
@@ -1308,6 +1385,8 @@ function InstallDialog({
   }
   const heading = t(phase === 'done' && install.subject?.bundled ? 'installBundledTitle' : SCREEN_TITLE_KEYS[phase])
   const pending = isInstallPending(phase)
+  // A settled screen whose install never reported a run can say the details received no terminal output.
+  const settledDetails = phase === 'failed' || phase === 'done' || phase === 'unknown'
   const cancellable = phase === 'starting' || phase === 'running' || phase === 'unconfirmed'
   const stoppable = cancellable || phase === 'failed' || phase === 'unknown'
   const failure = install.failure
@@ -1368,6 +1447,10 @@ function InstallDialog({
             <h2 className={css.wizardTitle} role={phase === 'failed' ? 'alert' : 'status'}>{heading}</h2>
             {phase === 'done' && subject?.bundled ? <p className={css.wizardSub}>{t('installBundledDescription')}</p> : null}
             {phase === 'failed' ? <p className={css.wizardSub}>{failureText(install.failure, t, install)}</p> : null}
+            {phase === 'failed' && failure?.stage === 'enable' && failure.enabled === true
+              && (failure.code !== undefined || failure.reason !== '')
+              ? <p className={css.wizardSub}>{t('installFailedEnabling')}</p>
+              : null}
             {attemptLine === null ? null : <p className={css.wizardSub}>{attemptLine}</p>}
             {uncertaintyText === null ? null : <p className={css.wizardSub} role="alert">{uncertaintyText}</p>}
             {phase === 'unknown' ? <p className={css.wizardSub}>{t('installUnknownDescription')}</p> : null}
@@ -1439,7 +1522,11 @@ function InstallDialog({
           {install.detailsOpen
             ? (
               <div className={css.detailsBody}>
-                <p className={css.installLocation}>{firstRun === undefined ? t('terminalNoOutput') : t('installLocation', { dir: firstRun.cwd })}</p>
+                {firstRun !== undefined
+                  ? <p className={css.installLocation}>{t('installLocation', { dir: firstRun.cwd })}</p>
+                  : settledDetails
+                    ? <p className={css.installLocation}>{t('installDetailsNoOutput')}</p>
+                    : null}
                 {install.runs.map((run, index) => {
                   const registry = asked?.registries[index]
                   return (
@@ -1459,6 +1546,9 @@ function InstallDialog({
                     </div>
                   )
                 })}
+                {install.logPath === null
+                  ? null
+                  : <p className={css.installLocation}>{t('installLogPath', { path: install.logPath })}</p>}
               </div>
             )
             : null}
@@ -1534,10 +1624,8 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
   }, [highlight, clearHighlight])
   const noticeLine = state.notice === null || state.notice.kind === 'refresh-failed' ? null : noticeText(state.notice, t)
 
-  // The page omits profile bundles and persistent terminals. Other installed or offered bundles and
-  // unreadable selections remain manageable; Settings' Plugin list inspects the full Host inventory.
   const listed = state.packages.filter(pkg => !HIDDEN_BUNDLES.has(pkg.name)
-    && (pkg.listedByDefault !== false || pkg.enabled || pkg.installed)
+    && (pkg.listedByDefault !== false || pkg.enabled || pkg.installed || rowsRunning(pkg))
     && (pkg.installed || pkg.official || pkg.error !== undefined))
   const mine = listed.filter(pkg => !pkg.official)
   const official = listed.filter(pkg => pkg.official)
@@ -1550,8 +1638,18 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
   const more = ordered
   const loaded = state.status === 'ready' || state.status === 'error'
   const refreshing = state.refreshStatus === 'refreshing'
-  const openPkg = view.kind === 'package' || view.kind === 'row' ? listed.find(pkg => pkg.name === view.name) : undefined
+  const openPkg = view.kind === 'package' || view.kind === 'row'
+    ? listed.find(pkg => pkg.name === view.name)
+    : undefined
   const openItem = view.kind === 'item' ? ledger.items.find(item => item.id === view.id) : undefined
+  // A plugin's settings page also shows on the listed row whose module registered it, or else on the bundle whose
+  // package registered it, when that row or bundle registers no configuration of its own; Settings shows it either way.
+  const rowModules = new Set(listed.flatMap(pkg => pkg.rows.map(row => row.moduleName)))
+  const sectionsOf = (pkg: PackageView, row: PackageRow): readonly SettingsSectionItem[] =>
+    ledger.rows.has(rowConfigKey(pkg.name, row.rowId)) ? [] : ledger.sections.filter(section => section.module === row.moduleName)
+  const bundleSections = (pkg: PackageView): readonly SettingsSectionItem[] => ledger.bundles.has(pkg.name) || rowModules.has(pkg.name)
+    ? []
+    : ledger.sections.filter(section => section.module === pkg.name)
   const openRow = view.kind === 'row' && openPkg !== undefined ? openPkg.rows.find(row => row.rowId === view.rowId) : undefined
   const onInstalled = tab === INSTALLED_TAB
   const showsCards = !onInstalled || (openPkg === undefined && openItem === undefined)
@@ -1569,12 +1667,16 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
     ? {}
     : { role: 'tabpanel', id: `${tabsId}-${INSTALLED_TAB}-panel`, 'aria-labelledby': `${tabsId}-${INSTALLED_TAB}` }
   const activated = listed.find(pkg => pkg.name === activation && pkg.enabled && !state.busy.includes(pkg.name))
+  const setBundleEnabled = (name: string, enabled: boolean): void => {
+    setActivation(enabled ? name : null)
+    props.setEnabled(name, enabled)
+  }
   const setRowEnabled = (row: PackageRow, enabled: boolean): void => {
     /* v8 ignore next -- a row without a live entry has its switch disabled */
     if (row.entryId !== undefined) props.setRowEnabled(row.entryId, enabled)
   }
   const configure = (pkg: PackageView): RowConfigure => ({
-    has: row => ledger.rows.has(rowConfigKey(pkg.name, row.rowId)),
+    has: row => ledger.rows.has(rowConfigKey(pkg.name, row.rowId)) || sectionsOf(pkg, row).length > 0,
     open: (row) => { setView({ kind: 'row', name: pkg.name, rowId: row.rowId, ...pkgOrigin }) },
   })
   const updates = updatesNote(mine, state.versions, t)
@@ -1590,7 +1692,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
       highlighted={state.highlight === pkg.name}
       newer={versionUpdate(state.versions[pkg.name])}
       onOpen={() => { setActivation(null); setView({ kind: 'package', name: pkg.name, ...showsMoreList ? { from: 'more' } : {} }) }}
-      onSetEnabled={(enabled) => { setActivation(enabled ? pkg.name : null); props.setEnabled(pkg.name, enabled) }}
+      onSetEnabled={(enabled) => { setBundleEnabled(pkg.name, enabled) }}
     />
   )
   const basicCards = ledger.items.map(item => (
@@ -1685,12 +1787,13 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
             </div>
           )
           : null}
-
+        <ClientSyncNotice sync={props.useClientSync(snapshot => snapshot)} t={t} retry={props.retryClient} />
         {!onInstalled
           ? (
             <div role="tabpanel" id={`${tabsId}-${tab}-panel`} aria-labelledby={`${tabsId}-${tab}`} className={css.tabPanel}>
               {renderSlot('plugins.tab', {
                 install: props.installFrom,
+                update: props.openGitUpdate,
                 openPackage: (name) => { setTab(INSTALLED_TAB); setView({ kind: 'package', name, returnTab: tab }) },
               }, { only: tab })}
             </div>
@@ -1733,6 +1836,8 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               pkg={openPkg}
               row={openRow}
               form={formFor(openRow.rowId)}
+              sections={sectionsOf(openPkg, openRow)}
+              renderFactory={props.renderFactorySlot}
               t={t}
               resolveText={resolveText}
               renderSlot={renderSlot}
@@ -1750,6 +1855,8 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               rowBusy={row => row.entryId !== undefined && state.busy.includes(rowKey(row.entryId))}
               configured={ledger.bundles.has(openPkg.name)}
               configure={configure(openPkg)}
+              sections={bundleSections(openPkg)}
+              renderFactory={props.renderFactorySlot}
               renderSlot={renderSlot}
               inMore={backToMore}
               detail={(
@@ -1761,7 +1868,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
                 if (returnTab !== undefined) setTab(returnTab)
                 setView({ kind: backToMore ? 'more' : 'list' })
               }}
-              onSetEnabled={(enabled) => { props.setEnabled(openPkg.name, enabled) }}
+              onSetEnabled={(enabled) => { setBundleEnabled(openPkg.name, enabled) }}
               onUninstall={() => { props.uninstall(openPkg.name) }}
               onUpdate={() => { props.update(openPkg.name) }}
               onSetRowEnabled={setRowEnabled}
@@ -1806,8 +1913,7 @@ export function PluginManagerPage(props: PluginManagerPageProps): ReactNode {
               </div>
             )
           : null}
-        {/* Activation guidance belongs beside the Installed list that holds the enabled bundle's card. */}
-        {installedCards && activated !== undefined && !state.install.open
+        {onInstalled && activated !== undefined && !state.install.open
           ? renderSlot('plugins.bundle.activation', {
             packageName: activated.name,
             onDismiss: () => { setActivation(null) },

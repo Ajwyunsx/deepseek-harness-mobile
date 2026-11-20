@@ -8,9 +8,15 @@
  * @module @deepseek-ai/dsh-experimental-auto-review
  */
 
+declare module '@deepseek-ai/dsh-llm/types' {
+  interface LlmRequestPurposeMap {
+    'auto-review': true
+  }
+}
+
 import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type {} from '@deepseek-ai/dsh-working-directory'
-import { FiberState, type Context } from '@deepseek-ai/cordis'
+import { Context, FiberState } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-instructions'
 import {
@@ -672,12 +678,15 @@ async function classifyRisk(
   const snapshot = snapshotAutoReview(agent, exec, cwd, shown)
   shown.set(snapshot.pending.key, snapshot.pending.schema)
   // This review prompt is sent only through ctx.llm.stream and never enters a Session log.
+  // The Session id also supplies provider routing and request-extension identity.
   const options: GenerateOptions = deepFreeze({
     provider: snapshot.provider,
     model: snapshot.model,
     system: REVIEW_POLICY,
     messages: reviewMessages(snapshot),
     temperature: 0,
+    sessionId: agent.session.id,
+    purpose: 'auto-review',
     signal,
   })
   return readDecision(ctx.llm.stream(options))
@@ -779,7 +788,7 @@ export function apply(ctx: Context): void {
       accepting = false
       try {
         // Root unload begins before child cleanup; only live plugin removal changes Session policy.
-        if (ctx.root.fiber.state === FiberState.ACTIVE) {
+        if (ctx[Context.root].fiber.state === FiberState.ACTIVE) {
           for (const session of ctx.sessions.list()) {
             if (permissionPresets.current(session) !== AUTO_PRESET) continue
             permissionPresets.set(session, 'danger-full-access')

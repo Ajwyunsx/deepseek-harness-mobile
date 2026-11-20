@@ -2,14 +2,15 @@
  * Workspace pick/add flow. WorkspacePickFlow is the reusable core (menu +
  * path error dialog) consumed directly by WorkspaceBrowser (same package) and
  * wrapped by WorkspacePicker for the conversation empty-state slot
- * registration. Directory picking itself lives in the composed flow package's
+ * registration and by WorkspacePickerFactory for the `workspace.picker`
+ * Factory. Directory picking itself lives in the composed flow package's
  * slot occupant (see the contract module doc): this core only opens the flow,
  * adopts the picked path, and owns the error surface. Adding a workspace has
  * exactly one route — pick a host directory, new or existing — because the
  * occupant's own create-folder affordance already covers creating one.
  */
-import type { ReactNode, RefObject } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ReactElement, ReactNode, RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button, IconFolderCloseRegular, IconPlusOutlineRegular, Menu, Modal, type MenuEntry,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -18,7 +19,7 @@ import type {
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { workspaceDisplayTitle } from '@deepseek-ai/dsh-api-workspace-controller/default-workspace'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from './contract/slots.ts'
+import type { DirectoryFlowOwnerProps, WorkspacePickerFactoryProps, WorkspacePickerProps } from './contract/slots.ts'
 import { distinguishingPathSuffixes } from './path-suffix.ts'
 import css from './WorkspacePicker.module.css'
 
@@ -74,12 +75,10 @@ export function WorkspacePickFlow({
   side = 'bottom',
   selectedId,
 }: WorkspacePickFlowProps) {
+  // Without an owner-provided anchor, the menu remains hidden.
+  const absentAnchor = useRef<HTMLElement>(null)
   const workspaceSnapshot = useWorkspaces(state => state)
   const workspaces = workspaceSnapshot.items
-  const getAnchorRect = useCallback(
-    () => anchorRef?.current?.getBoundingClientRect() ?? null,
-    [anchorRef],
-  )
   const [errorOpen, setErrorOpen] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [flowOpen, setFlowOpen] = useState(false)
@@ -221,7 +220,7 @@ export function WorkspacePickFlow({
         onClose={onClose}
         side={side}
         portal
-        getAnchorRect={getAnchorRect}
+        anchorRef={anchorRef ?? absentAnchor}
       />
       {open && !addIsTheOnlyEntry && !menuIsEmpty && workspaceSnapshot.phase === 'pending' && <div className={css.menuStatus} role="status">{t('picker.loading')}</div>}
       {renderDirectoryFlow(flowOwner)}
@@ -246,23 +245,18 @@ export function WorkspacePickFlow({
 }
 
 /**
- * The conversation empty-state registration: adapts the owner share to the
- * core flow (all state and semantics live in the flow / the owner).
- * @param props - empty-state slot props (owner share + injected creation callback).
- * @returns the flow element.
+ * The flow inputs both picker surfaces forward unchanged; each surface
+ * supplies only the render function of its own directory-flow hole.
  */
-export function WorkspacePicker({
-  open,
-  anchorRef,
-  useWorkspaces,
-  selectedId,
-  onPick,
-  onClose,
-  createWorkspace,
-  useDirectoryFlow,
-  renderSlot,
-  t,
-}: WorkspacePickerProps) {
+type PickerSurfaceProps = Pick<
+  WorkspacePickFlowProps,
+  't' | 'open' | 'anchorRef' | 'useWorkspaces' | 'createWorkspace' | 'useDirectoryFlow' | 'selectedId' | 'onPick' | 'onClose'
+>
+
+function surfaceFlow(
+  { t, open, anchorRef, useWorkspaces, createWorkspace, useDirectoryFlow, selectedId, onPick, onClose }: PickerSurfaceProps,
+  renderDirectoryFlow: WorkspacePickFlowProps['renderDirectoryFlow'],
+): ReactElement {
   return (
     <WorkspacePickFlow
       t={t}
@@ -271,10 +265,32 @@ export function WorkspacePicker({
       useWorkspaces={useWorkspaces}
       createWorkspace={createWorkspace}
       useDirectoryFlow={useDirectoryFlow}
-      renderDirectoryFlow={owner => renderSlot('conversation.hero.workspace.directoryFlow', owner)}
+      renderDirectoryFlow={renderDirectoryFlow}
       selectedId={selectedId}
       onPick={onPick}
       onClose={onClose}
     />
   )
+}
+
+/**
+ * The conversation empty-state registration: adapts the owner share to the
+ * core flow (all state and semantics live in the flow / the owner).
+ * @param props - empty-state slot props (owner share + injected creation callback).
+ * @returns the flow element.
+ */
+export function WorkspacePicker(props: WorkspacePickerProps) {
+  const { renderSlot } = props
+  return surfaceFlow(props, owner => renderSlot('conversation.hero.workspace.directoryFlow', owner))
+}
+
+/**
+ * The `workspace.picker` Factory definition: the same flow for another
+ * plugin's surface, under the Factory's own directory-flow hole.
+ * @param props - caller input, injected creation share, and the locale seat.
+ * @returns the flow element.
+ */
+export function WorkspacePickerFactory(props: WorkspacePickerFactoryProps) {
+  const { renderSlot } = props
+  return surfaceFlow(props, owner => renderSlot('workspace.picker.directoryFlow', owner))
 }

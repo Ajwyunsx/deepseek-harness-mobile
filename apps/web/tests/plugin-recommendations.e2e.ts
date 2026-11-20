@@ -1,9 +1,9 @@
-/** Replay model output through the shipped Web profile and decide its real propose_action card. */
+/** Replay model output through the shipped Web profile and decide the real card its action-card block offers. */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Page } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type {} from '@deepseek-ai/dsh-plugin-manager'
 import {
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
@@ -19,21 +19,29 @@ describe('official plugin recommendation in a conversation', () => {
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
+  let restoreCatalog: (() => void) | undefined
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({ replayFixture: fixture, compareReplaySession: true,
       profile: { packages: [{ dir: fileURLToPath(new URL('../../../packages/experimental/personalized-recommendations', import.meta.url)), enabled: true }] },
     })
+    // The recorded conversation exercises voice input; unrelated installed plugins vary by Host.
+    // Keep the real inventory read so accidental enablement still changes the observed selection.
+    const listBundles = scaffold.ctx.pluginManager.listBundles.bind(scaffold.ctx.pluginManager)
+    const catalog = vi.spyOn(scaffold.ctx.pluginManager, 'listBundles')
+      .mockImplementation(async () => (await listBundles()).filter(bundle => bundle.name === voiceBundle))
+    restoreCatalog = () => { catalog.mockRestore() }
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
   })
 
   afterAll(async () => {
-    await browser?.close()
-    await scaffold?.close()
+    try { await browser?.close() } finally {
+      try { await scaffold?.close() } finally { restoreCatalog?.() }
+    }
   })
 
-  it('offers the propose_action call as one card below the answer, and reports a dismissal on the next request', async () => {
+  it('offers the action-card block as one card below the answer, and reports a dismissal on the next request', async () => {
     const tripwire = watchConsole(page)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await connectFreshWorkspace(page, scaffold.workspaceCwd)
@@ -52,7 +60,9 @@ describe('official plugin recommendation in a conversation', () => {
     const cardBox = await card.boundingBox()
     expect(answerBox).not.toBeNull()
     expect(cardBox!.y).toBeGreaterThanOrEqual(answerBox!.y + answerBox!.height)
+    // The answer's action-card block stays hidden; only the card below shows its proposal.
     expect(await page.getByText('enable_official_plugin').count()).toBe(0)
+    expect(await page.locator('.md-code-block').count()).toBe(0)
     await card.getByText('Voice input', { exact: true }).waitFor()
     expect(await card.getByRole('button', { name: 'Enable', exact: true }).isEnabled()).toBe(true)
     expect((await scaffold.ctx.pluginManager.listBundles()).find(bundle => bundle.name === voiceBundle)?.enabled).toBe(false)

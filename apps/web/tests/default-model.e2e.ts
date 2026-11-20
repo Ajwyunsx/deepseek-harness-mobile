@@ -16,9 +16,10 @@ import { join } from 'node:path'
 import type { Browser, Locator, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { launchWebScaffold, watchConsole, captureStableAria, compareOrRefreshGolden, webSnapshotMode, type WebScaffold } from './scaffold.ts'
 import { ZH_BROWSER_LOCALE, connectFreshWorkspaceZh, saveFailureShot } from './support.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 /** Points the shipped shared Agent default at this scenario's own route. */
 const OVERLAY = fileURLToPath(new URL('./default-model.overlay.yml', import.meta.url))
@@ -39,7 +40,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
   /** Create one session and its agent through the same wire face the browser uses. */
   const createSession = async (sessionId: string): Promise<string> => {
     const response = await scaffold.ctx.sessionController.create({
-      sessionId: SessionId(sessionId),
+      sessionId: brandString<SessionId>(sessionId),
       cwd: scaffold.workspaceCwd,
     })
     return response.sessionId
@@ -47,7 +48,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
 
   /** The route the Client derives from the Session projection and Host default. */
   const currentOf = (sessionId: string): Promise<unknown> => {
-    const session = scaffold.ctx.sessions.get(SessionId(sessionId))
+    const session = scaffold.ctx.sessions.get(brandString<SessionId>(sessionId))
     if (session === undefined) throw new Error(`session "${sessionId}" is not live`)
     return Promise.resolve(
       scaffold.ctx.sessionProjections.snapshot(session).values.modelSelection?.next
@@ -141,7 +142,13 @@ describe('web e2e: the composer model switch is the default for later sessions',
         badge.textContent = ' — Provider identification badge with a long channel name'
         node.appendChild(badge)
       })
-      await expect.poll(async () => (await surface.boundingBox())!.width).toBeGreaterThan(original!.width + 50)
+      if (pane === 'root') {
+        expect(original!.width).toBe(240)
+        await expect.poll(async () => (await surface.boundingBox())!.width).toBe(240)
+        await expect.poll(async () => (await surface.boundingBox())!.x).toBeCloseTo(original!.x)
+      } else {
+        await expect.poll(async () => (await surface.boundingBox())!.width).toBeGreaterThan(original!.width + 50)
+      }
       await expect.poll(async () => {
         const box = (await surface.boundingBox())!
         return box.x >= 12 && box.x + box.width <= 378
@@ -156,7 +163,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
     }
   })
 
-  it('keeps command popup search borders transparent in both palettes', async () => {
+  it('keeps command popup searches borderless in both palettes', async () => {
     const composer = page.locator('[data-composer-input]').first()
     await page.getByRole('button', { name: '添加文件或调用指令', exact: true }).click()
     const commandMenuBounds = await page.locator('[data-trigger-menu]').boundingBox()
@@ -170,7 +177,8 @@ describe('web e2e: the composer model switch is the default for later sessions',
       expect(popupBounds!.width).toBeCloseTo(commandMenuBounds!.width)
       expect(popupBounds!.x).toBeCloseTo(commandMenuBounds!.x)
       expect(await search.getAttribute('placeholder')).toBe('搜索模型…')
-      await page.getByRole('option').first().waitFor()
+      // Command menu height changes where the pointer lands in the model popup.
+      await page.getByRole('option', { name: 'Acme Large', exact: true }).hover()
       await compareOrRefreshGolden(
         fileURLToPath(new URL('./expected/default-model/command-picker.expected.md', import.meta.url)),
         await captureStableAria(page, '[aria-label="/model 选项"]', scaffold.workspaceCwd),
@@ -185,14 +193,15 @@ describe('web e2e: the composer model switch is the default for later sessions',
         try {
           return [false, true].map((dark) => {
             body.toggleAttribute('data-ds-dark-theme', dark)
-            return getComputedStyle(input).borderColor
+            const style = getComputedStyle(input)
+            return { width: style.borderWidth, style: style.borderStyle }
           })
         } finally {
           if (previousTheme === null) body.removeAttribute('data-ds-dark-theme')
           else body.setAttribute('data-ds-dark-theme', previousTheme)
         }
       })
-      expect(borders).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)'])
+      expect(borders).toEqual([{ width: '0px', style: 'none' }, { width: '0px', style: 'none' }])
     } finally {
       await search.press('Escape')
       await composer.fill('')
@@ -272,6 +281,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
       await observeFocus('Enter model pane')
       await devicePage.keyboard.press('ArrowDown')
       const search = devicePage.getByRole('searchbox', { name: '搜索模型…' })
+      expect(await search.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')
       await expect.poll(() => search.evaluate(element => document.activeElement === element)).toBe(true)
       await observeFocus('Navigate models')
       await devicePage.keyboard.press('Escape')
@@ -471,7 +481,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
     // A session that has already run a turn, spelled as the fact a turn
     // leaves behind: its own logged route.
     const loggedId = await createSession('default-model-logged')
-    scaffold.ctx.sessions.get(SessionId(loggedId))?.append('request/header', {
+    scaffold.ctx.sessions.get(brandString<SessionId>(loggedId))?.append('request/header', {
       header: { config: { provider: START_ROUTE, model: START_MODEL } },
       reason: 'initial',
     })
@@ -563,7 +573,7 @@ describe('web e2e: the composer model switch is the default for later sessions',
     for (const palette of headingPalettes) {
       expect(palette.headingFills, `${palette.platform}, dark=${String(palette.dark)}`)
         .toEqual(['rgba(0, 0, 0, 0)'])
-      expect(palette.menuFill).toBe(palette.dark ? 'rgba(67, 69, 74, 0.45)' : 'rgba(248, 249, 250, 0.58)')
+      expect(palette.menuFill).toBe(palette.dark ? 'rgba(48, 49, 54, 0.64)' : 'rgba(252, 253, 254, 0.7)')
       expect(palette.searchBorder).toBe('rgba(0, 0, 0, 0)')
       expect(palette.positions).toEqual(['sticky'])
       expect(palette.headingRadii).toEqual([palette.platform === 'darwin' ? '0px' : palette.optionRadius])

@@ -16,12 +16,18 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import {
   JsonRpcLineTransport,
   JsonRpcResponseError,
+  type CommandExecution,
   type InitializeParams,
   type InitializeResult,
   type SessionPromptParams,
+  type SessionResumeParams,
+  type SessionQueryParams,
+  type SessionQueryResult,
   type SdkPromptContentBlock,
   type SdkUserQuestionRequest,
 } from '@deepseek-ai/dsh-sdk-protocol'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { type SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { disposeRuntimeProcess } from './dispose.ts'
 import { resolveDshLaunch, type RuntimeProcessOptions } from './launch.ts'
 import type { HarnessClientOptions, HarnessNotification, NotificationFilter } from './types.ts'
@@ -342,7 +348,7 @@ export class HarnessClient {
   }
 
   /**
-   * Queue one prompt and return its durable inbox identity.
+   * Queue one prompt without native command routing and return its durable inbox identity.
    * @param sessionId - target session; an unknown id creates it.
    * @param contentBlocks - the user message, sent verbatim.
    * @returns the queued message id.
@@ -359,10 +365,11 @@ export class HarnessClient {
   /**
    * Restore persisted history without sending a prompt; failures propagate without creating a session.
    * @param sessionId - persisted identity in this runtime's configured persistence store.
+   * @param options - explicit permission preset to persist before execution; omission retains saved permissions.
    * @returns after the session is ready for prompts.
    */
-  async resumeSession(sessionId: string): Promise<void> {
-    await this.request('session/resume', { sessionId })
+  async resumeSession(sessionId: string, options: Omit<SessionResumeParams, 'sessionId'> = {}): Promise<void> {
+    await this.request('session/resume', { ...options, sessionId })
   }
 
   /**
@@ -375,7 +382,7 @@ export class HarnessClient {
   }
 
   /**
-   * Change a Session's effective directory without changing origin or permissions.
+   * Change a Session's effective directory without changing its origin; the workspace-write boundary follows it.
    * @param sessionId - target Session; an unknown id creates it.
    * @param path - absolute or Session-current-directory-relative path.
    * @returns the validated absolute directory.
@@ -577,12 +584,69 @@ export function createProcessHarnessClient(options: RuntimeProcessOptions): Harn
 }
 
 /**
+ * Send routed input for the package's high-level run API; absent from the package exports.
+ * @param client - client owning the initialized runtime connection.
+ * @param sessionId - target Session; an unknown id creates it.
+ * @param input - text or content blocks, without client-side command interpretation.
+ * @returns the validated prompt receipt or native command execution.
+ */
+export async function queryInput(
+  client: HarnessClient,
+  sessionId: string,
+  input: string | SdkPromptContentBlock[],
+): Promise<SessionQueryResult> {
+  const params: SessionQueryParams = {
+    sessionId: brandString<SessionId>(sessionId), contentBlocks: normalizeInput(input),
+  }
+  const value = await client.request('session/query', params)
+  if (isRecord(value)) {
+    if (value.kind === 'prompt' && typeof value.messageId === 'string' && value.messageId.length > 0) {
+      return { kind: 'prompt', messageId: value.messageId }
+    }
+    if (value.kind === 'command') {
+      return { kind: 'command', execution: commandExecution(value.execution) }
+    }
+  }
+  throw new SdkProtocolError(`session/query returned an invalid routing result: ${JSON.stringify(value)}`)
+}
+
+/**
+ * Normalize routed input: a string becomes one text block; blocks pass verbatim.
+ * @param input - prompt or command text, or content blocks.
+ * @returns the content blocks to send.
+ */
+export function normalizeInput(input: string | SdkPromptContentBlock[]): SdkPromptContentBlock[] {
+  return typeof input === 'string' ? [{ type: 'text', text: input }] : input
+}
+
+/**
  * Whether `value` is a plain JSON object (the wire-boundary shape probe).
  * @param value - the wire value to probe.
  * @returns `true` iff `value` is a non-null, non-array object.
  */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Decode the native handler result returned by session/query. */
+function commandExecution(value: unknown): CommandExecution {
+  if (isRecord(value) && typeof value.commandId === 'string' && value.commandId.length > 0 && isRecord(value.result)) {
+    const commandId = value.commandId as CommandExecution['commandId']
+    const { kind, text, sourceEventSeq } = value.result
+    if (kind === 'success' && (text === undefined || typeof text === 'string')
+      && (sourceEventSeq === undefined || (typeof sourceEventSeq === 'number'
+        && Number.isSafeInteger(sourceEventSeq) && sourceEventSeq >= 0))) {
+      return { commandId, result: {
+        kind,
+        ...text === undefined ? {} : { text },
+        ...sourceEventSeq === undefined ? {} : { sourceEventSeq: SessionSeq(sourceEventSeq) },
+      } }
+    }
+    if (kind === 'error' && typeof text === 'string' && text.trim().length > 0) {
+      return { commandId, result: { kind, text } }
+    }
+  }
+  throw new SdkProtocolError(`session/query returned an invalid command result: ${JSON.stringify(value)}`)
 }
 
 /** The message of a thrown value (the transport only throws `Error`s; `String` covers the rest). */

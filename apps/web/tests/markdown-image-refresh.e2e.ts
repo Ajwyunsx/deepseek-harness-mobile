@@ -1,14 +1,16 @@
 // A rewritten local image file shows its current bytes in a newly rendered Markdown image.
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, Session, type SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-title'
 import { launchWebScaffold, seedSession, watchConsole, type WebScaffold } from './scaffold.ts'
 import { newEnglishPage, saveFailureShot, WEB_FIXTURE_TIME } from './support.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 const ALT = 'Rewritten chart'
 const chart = (width: number, color: string): string =>
@@ -16,7 +18,7 @@ const chart = (width: number, color: string): string =>
 
 /** Build one closed session whose reply shows `{{cwd}}/chart.svg`. */
 function chartFixture(title: string): string {
-  const session = Session.create(SessionId('markdown-image-refresh-source'))
+  const session = Session.create(brandString<SessionId>('markdown-image-refresh-source'))
   session.append('turn/start', { turn: 1 })
   const user = session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'Draw the chart.' }],
@@ -50,7 +52,11 @@ describe('web e2e: rewritten Markdown image files', () => {
   let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold({})
+    scaffold = await launchWebScaffold({
+      openInAppEnvironment: createLaunchEnvironmentSnapshot([
+        { source: 'process', values: { SSH_CONNECTION: '10.0.0.2 55000 10.0.0.9 22' } },
+      ]),
+    })
     await writeFile(join(scaffold.workspaceCwd, 'chart.svg'), chart(120, 'red'))
     await seedSession(scaffold, chartFixture('First chart'), 'markdown-image-refresh-first', undefined,
       { createdAt: WEB_FIXTURE_TIME - 120_000 })
@@ -81,6 +87,14 @@ describe('web e2e: rewritten Markdown image files', () => {
     await page.getByRole('treeitem').nth(1).click()
     await page.getByText('Second chart', { exact: true }).last().waitFor()
     await expect.poll(width, { timeout: 10_000 }).toBe(240)
+    await page.getByRole('img', { name: ALT }).click({ button: 'right' })
+    const action = page.getByRole('menuitem', { name: 'Download', exact: true })
+    await action.waitFor()
+    const [download] = await Promise.all([page.waitForEvent('download'), action.click()])
+    expect(download.suggestedFilename()).toBe('chart.svg')
+    const path = await download.path()
+    if (path === null) throw new Error('Browser download unavailable')
+    expect(await readFile(path, 'utf8')).toBe(chart(240, 'blue'))
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
   }, 60_000)

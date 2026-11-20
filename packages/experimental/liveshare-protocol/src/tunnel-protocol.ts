@@ -29,7 +29,6 @@ export const LIVESHARE_CAPABILITIES = [
   'scoped-rpc-response',
   'unsupported-frame-refusal',
   'share-access-state',
-  'file-upload',
   'actor-credential',
   'direct-connection',
 ] as const
@@ -38,19 +37,29 @@ export const LIVESHARE_CAPABILITIES = [
 export type LiveshareCapability = typeof LIVESHARE_CAPABILITIES[number]
 
 /**
+ * Operating systems an owner may report at registration.
+ *
+ * A fixed enum rather than free text: the Relay matches three names instead of normalising spellings
+ * that drift between peers, the picker renders an icon and a label from the same table, and the value
+ * names a display class rather than a kernel, distribution, or architecture.
+ */
+export const LIVESHARE_OWNER_PLATFORMS = ['macos', 'windows', 'linux'] as const
+
+/** One operating-system class an owner may report; absent means the owner reported none. */
+export type LiveshareOwnerPlatform = typeof LIVESHARE_OWNER_PLATFORMS[number]
+
+/**
  * The permission facts a share publishes.
  *
  * The owner asks for them in {@link TunnelShareSpec}; the Relay commits them in
  * {@link ShareAccessStateFrame}. The committed frame is the authority: a reader follows it, not the
- * request that produced it. `allowsFileUpload` is optional here because a request may omit the switch,
- * while a committed frame always states it.
+ * request that produced it.
  */
 export interface SharePermissions {
   readonly accessMode: 'open' | 'selected'
   readonly allowedSubjectIds: readonly string[]
   readonly sessionMode?: 'view' | 'write'
   readonly allowsFork?: boolean
-  readonly allowsFileUpload?: boolean
   readonly expiresAt?: string
 }
 
@@ -71,6 +80,13 @@ export interface TunnelShareSpec extends SharePermissions {
   /** Display-only: the owner's DSH version shown on the Relay share picker. */
   readonly dshVersion?: string
   /**
+   * Display-only: the operating system this owner runs on, shown beside the share title.
+   *
+   * Absent means this owner reports no platform: the build runs on one outside
+   * {@link LIVESHARE_OWNER_PLATFORMS}, and the Relay shows no platform rather than guessing.
+   */
+  readonly platform?: LiveshareOwnerPlatform
+  /**
    * Stable id of the owner DSH instance that published this share. Not display-only: the Relay groups
    * shares of the same owner instance by it.
    */
@@ -89,12 +105,6 @@ export interface TunnelShareSpec extends SharePermissions {
    * `write` also modifies the files inside that workspace. Absent reads as `view`.
    */
   readonly sessionMode?: 'view' | 'write'
-  /**
-   * Whether an admitted viewer may attach uploaded files in this share's Session and its own forks.
-   *
-   * Independent of the tier and of {@link TunnelShareSpec.allowsFork}; absent means no file uploads.
-   */
-  readonly allowsFileUpload?: boolean
   /**
    * Relay-issued owner credential proving which logged-in subject publishes this share. The Relay
    * refuses a new share without it and ignores self-reported identity fields when it is present.
@@ -175,6 +185,11 @@ export interface ShareRpcActor {
   readonly tenantId: string
   readonly subjectId: string
   /**
+   * Display name the Relay asserted for this identity, when its provider published one. It is
+   * presentation data only: attribution may show it, while authorization uses the triple.
+   */
+  readonly displayName?: string
+  /**
    * Owner-verifiable credential asserting this identity, when the deployment's data path has no
    * in-band authority to assert it (a viewer reaching the owner directly). Absent today: the Relay
    * asserts the triple itself. The owner verifies it before trusting the identity; the protocol does
@@ -243,13 +258,14 @@ export interface ShareAccessStateFrame extends SharePermissions {
    * Absent means no forking.
    */
   readonly allowsFork?: boolean
-  /** Whether this share permits viewer file uploads; always present after parsing, absent means false. */
-  readonly allowsFileUpload: boolean
   readonly expiresAt?: string
 }
 
 /** Every frame exchanged between the Relay and one owner gateway. */
 export type Frame = ShareRpcFrame | ShareRpcResFrame | ShareRpcCancelFrame | ShareAccessStateFrame
+
+/** Every frame the Relay can send: the answers and requests the gateway emits are not among them. */
+export type RelayFrame = ShareRpcFrame | ShareRpcCancelFrame | ShareAccessStateFrame
 
 /** The part of a socket `sendFrame` needs, satisfied by a `ws` WebSocket. */
 export interface FrameSocket {
@@ -336,7 +352,7 @@ export function parseGatewayFrame(text: string): Frame | undefined {
  * @param value Decoded JSON value.
  * @returns Parsed frame, or undefined when the frame is not accepted.
  */
-function parseRelayValue(value: unknown): Frame | undefined {
+function parseRelayValue(value: unknown): RelayFrame | undefined {
   const state = parseShareAccessState(value)
   if (state !== undefined) return state
   const envelope = frameEnvelope(value)
@@ -358,7 +374,7 @@ function parseRelayValue(value: unknown): Frame | undefined {
  * @param text Raw socket text.
  * @returns Parsed frame, or undefined when the frame is not accepted.
  */
-export function parseRelayFrame(text: string): Frame | undefined {
+export function parseRelayFrame(text: string): RelayFrame | undefined {
   let value: unknown
   try {
     value = JSON.parse(text)
@@ -537,10 +553,10 @@ function isTunnelShareSpec(value: unknown): value is TunnelShareSpec {
     && (value.ownerProviderId === undefined || typeof value.ownerProviderId === 'string')
     && (value.ownerTenantId === undefined || typeof value.ownerTenantId === 'string')
     && (value.dshVersion === undefined || typeof value.dshVersion === 'string')
+    && isOwnerPlatform(value.platform)
     && (value.ownerInstanceId === undefined || typeof value.ownerInstanceId === 'string')
     && (value.allowsFork === undefined || typeof value.allowsFork === 'boolean')
     && (mode === undefined || mode === 'view' || mode === 'write')
-    && (value.allowsFileUpload === undefined || typeof value.allowsFileUpload === 'boolean')
     && (value.connection === undefined
       || (isRecord(value.connection) && (value.connection.mode === 'relay' || value.connection.mode === 'direct')))
     && (value.ownerCredential === undefined || typeof value.ownerCredential === 'string')
@@ -548,6 +564,16 @@ function isTunnelShareSpec(value: unknown): value is TunnelShareSpec {
     && value.allowedSubjectIds.every(subject => typeof subject === 'string' && subject !== '')
     && (value.expiresAt === undefined
       || (typeof value.expiresAt === 'string' && Number.isFinite(Date.parse(value.expiresAt))))
+}
+
+/**
+ * Validate a reported owner platform at the IPC parser.
+ * @param value Candidate field.
+ * @returns True when it is absent or names one of {@link LIVESHARE_OWNER_PLATFORMS}.
+ */
+function isOwnerPlatform(value: unknown): value is LiveshareOwnerPlatform | undefined {
+  return value === undefined
+    || LIVESHARE_OWNER_PLATFORMS.some(platform => platform === value)
 }
 
 /**
@@ -561,6 +587,7 @@ function isShareRpcActor(value: unknown): value is ShareRpcActor {
   return typeof actor.providerId === 'string' && actor.providerId !== ''
     && typeof actor.tenantId === 'string' && actor.tenantId !== ''
     && typeof actor.subjectId === 'string' && actor.subjectId !== ''
+    && (actor.displayName === undefined || (typeof actor.displayName === 'string' && actor.displayName !== ''))
     && (actor.credential === undefined || typeof actor.credential === 'string')
 }
 
@@ -595,13 +622,11 @@ export function parseShareAccessState(value: unknown): ShareAccessStateFrame | u
     || !isSubjectIds(value.allowedSubjectIds)
     || (value.sessionMode !== 'view' && value.sessionMode !== 'write')
     || (value.allowsFork !== undefined && typeof value.allowsFork !== 'boolean')
-    || (value.allowsFileUpload !== undefined && typeof value.allowsFileUpload !== 'boolean')
     || (value.expiresAt !== undefined && (typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))))) {
     return undefined
   }
   return { type: 'share-access-state', version: Number(value.version), accessMode: value.accessMode,
     allowedSubjectIds: [...value.allowedSubjectIds], sessionMode: value.sessionMode,
-    allowsFileUpload: value.allowsFileUpload === true,
     ...(value.allowsFork === undefined ? {} : { allowsFork: value.allowsFork }),
     ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) }
 }

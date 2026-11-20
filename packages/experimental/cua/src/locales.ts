@@ -2,57 +2,57 @@
 
 /** English application-access messages. */
 export const en = {
-  question: 'Allow computer use to launch, read, capture and control this application?',
-  detail: 'Session access lasts until DSH restarts or computer use is disabled.',
+  question: 'Allow agent to control this application via computer use?',
+  detail: 'Manage app permissions for all sessions on the plugin page.',
   approve: 'Allow for this session',
 }
 
 /** Chinese application-access messages. */
 export const zh = {
-  question: '允许 Computer Use 启动、读取、截图和控制此应用吗？',
-  detail: '会话授权在 DSH 重启或关闭 Computer Use 后失效。',
+  question: '允许智能体通过 Computer Use 控制此应用吗？',
+  detail: '在插件页面管理所有会话的应用权限。',
   approve: '本会话允许',
 } satisfies Record<keyof typeof en, string>
 
 /** Japanese application-access messages. */
 export const ja = {
-  question: 'Computer Use によるこのアプリの起動、読み取り、画面キャプチャ、操作を許可しますか？',
-  detail: 'セッションの許可は DSH の再起動または Computer Use の無効化まで有効です。',
+  question: 'エージェントが Computer Use でこのアプリを操作することを許可しますか？',
+  detail: 'プラグインページで、すべてのセッションのアプリ権限を管理できます。',
   approve: 'このセッションで許可',
 } satisfies Record<keyof typeof en, string>
 
 /** Spanish dictionary, checked against the English keys. */
 export const es = {
-  question: '¿Permitir que Computer Use inicie, lea, capture y controle esta aplicación?',
-  detail: 'El acceso de esta sesión dura hasta que se reinicie DSH o se desactive Computer Use.',
+  question: '¿Permitir que el agente controle esta aplicación mediante Computer Use?',
+  detail: 'Gestiona los permisos de las aplicaciones para todas las sesiones en la página del plugin.',
   approve: 'Permitir durante esta sesión',
 } satisfies Record<keyof typeof en, string>
 
 /** French dictionary, checked against the English keys. */
 export const fr = {
-  question: 'Autoriser Computer Use à lancer, lire, capturer et contrôler cette application ?',
-  detail: 'L’autorisation de cette session reste valable jusqu’au redémarrage de DSH ou à la désactivation de Computer Use.',
+  question: 'Autoriser l’agent à contrôler cette application via Computer Use ?',
+  detail: 'Gérez les autorisations des applications pour toutes les sessions sur la page du plugin.',
   approve: 'Autoriser pour cette session',
 } satisfies Record<keyof typeof en, string>
 
 /** German dictionary, checked against the English keys. */
 export const de = {
-  question: 'Darf Computer Use diese Anwendung starten, lesen, aufnehmen und steuern?',
-  detail: 'Der Zugriff für diese Sitzung gilt, bis DSH neu gestartet oder Computer Use deaktiviert wird.',
+  question: 'Darf der Agent diese Anwendung über Computer Use steuern?',
+  detail: 'Verwalten Sie App-Berechtigungen für alle Sitzungen auf der Plugin-Seite.',
   approve: 'Für diese Sitzung zulassen',
 } satisfies Record<keyof typeof en, string>
 
 /** Russian dictionary, checked against the English keys. */
 export const ru = {
-  question: 'Разрешить Computer Use запуск, чтение, захват и управление этим приложением?',
-  detail: 'Доступ для этого сеанса действует до перезапуска DSH или отключения Computer Use.',
+  question: 'Разрешить агенту управлять этим приложением через Computer Use?',
+  detail: 'Управляйте разрешениями приложений для всех сеансов на странице плагина.',
   approve: 'Разрешить для этого сеанса',
 } satisfies Record<keyof typeof en, string>
 
 /** Portuguese dictionary, checked against the English keys. */
 export const pt = {
-  question: 'Permitir que o Computer Use inicie, leia, capture e controle este aplicativo?',
-  detail: 'O acesso desta sessão dura até que o DSH seja reiniciado ou o Computer Use seja desativado.',
+  question: 'Permitir que o agente controle este aplicativo via Computer Use?',
+  detail: 'Gerencie as permissões dos aplicativos para todas as sessões na página do plugin.',
   approve: 'Permitir nesta sessão',
 } satisfies Record<keyof typeof en, string>
 
@@ -79,4 +79,27 @@ export const applicationAccessDisplay = {
     ru: ru.approve,
     pt: pt.approve,
   },
+}
+
+/** Window consent never grants access to sibling windows or application launch. */
+export const windowAccessQuestion = {
+  en: 'Allow computer use to read, capture and control this window?',
+  zh: '允许电脑操作读取、截图并控制这个窗口吗？',
+  ja: 'このウィンドウの読み取り、撮影、操作を許可しますか？',
+  es: '¿Permitir leer, capturar y controlar esta ventana?',
+  fr: 'Autoriser la lecture, la capture et le contrôle de cette fenêtre ?',
+  de: 'Lesen, Aufnehmen und Steuern dieses Fensters erlauben?',
+  ru: 'Разрешить чтение, снимки и управление этим окном?',
+  pt: 'Permitir ler, capturar e controlar esta janela?',
+}
+/** Launch consent does not grant access to resulting windows. */
+export const launchAccessQuestion = {
+  en: 'Allow computer use to launch this entry? Window access is requested separately.',
+  zh: '允许电脑操作启动这个入口吗？窗口访问将单独请求授权。',
+  ja: 'この項目の起動を許可しますか？ウィンドウへのアクセスは別途確認します。',
+  es: '¿Permitir iniciar esta entrada? El acceso a ventanas se solicita por separado.',
+  fr: 'Autoriser le lancement de cette entrée ? L’accès aux fenêtres sera demandé séparément.',
+  de: 'Diesen Eintrag starten? Fensterzugriff wird separat angefragt.',
+  ru: 'Разрешить запуск? Доступ к окнам запрашивается отдельно.',
+  pt: 'Permitir iniciar esta entrada? O acesso às janelas é solicitado separadamente.',
 }

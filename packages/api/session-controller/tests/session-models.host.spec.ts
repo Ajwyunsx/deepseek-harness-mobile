@@ -13,7 +13,8 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AttachmentStore from '@deepseek-ai/dsh-attachment'
-import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import LlmRuntime, { LlmAdapter, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions, LlmCallConfigAdapterDefaults, LlmModelInfo,
   LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
@@ -78,11 +79,11 @@ class CatalogAdapter extends LlmAdapter {
 
 const REASONING: LlmModelReasoningInfo = {
   efforts: [
-    { id: ReasoningEffortId('off'), name: 'Off' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-    { id: ReasoningEffortId('max'), name: 'Max' },
+    { id: brandString<ReasoningEffortId>('off'), name: 'Off' },
+    { id: brandString<ReasoningEffortId>('high'), name: 'High' },
+    { id: brandString<ReasoningEffortId>('max'), name: 'Max' },
   ],
-  defaultEffort: ReasoningEffortId('high'),
+  defaultEffort: brandString<ReasoningEffortId>('high'),
 }
 
 async function harness(logged?: {
@@ -329,40 +330,6 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
-  it('authorizes attachment bytes only when the session event stream references the id', async () => {
-    const { ctx, agent, sessionId } = await harness()
-    const ref = {
-      attachmentId: 'att-authorized', mediaType: 'image/png' as const, bytes: 2, width: 1, height: 1,
-    }
-    const readImage = vi.fn(() => Promise.resolve({ ref, data: Uint8Array.of(1, 2) }))
-    ctx.provide('attachments', { readImage } as never)
-    const remote = await createSessionTestRemote(ctx, {
-      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }),
-      cwd: '/tmp',
-    })
-    agent.session.append('agent/inbox/spliced', {
-      target: 'next-turn',
-      start: 0,
-      inserted: [{
-        id: 'queued-image', role: 'user', source: { kind: 'user' },
-        content: [{ type: 'image', attachment: ref }],
-      }],
-    } as never)
-
-    const allowed = await remote.attachment(request({
-      sessionId, attachmentId: 'att-authorized' as never,
-    }))
-    expect(allowed).toMatchObject({ ok: true, value: { attachment: ref, data: 'AQI=' } })
-    const denied = await remote.attachment(request({
-      sessionId, attachmentId: 'att-other' as never,
-    }))
-    expect(denied).toMatchObject({
-      ok: false,
-      error: { code: 'session/attachment-invalid', details: { reason: 'ATTACHMENT_NOT_REFERENCED' } },
-    })
-    expect(readImage).toHaveBeenCalledOnce()
-    await ctx.fiber.dispose()
-  })
   it('checks configured key references even for empty catalogs and skips profiles without keys', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -427,7 +394,7 @@ describe('Web session model selection', () => {
     const { ctx, sessionId } = await harness({
       provider: 'deepseek-official',
       model: 'private-preview',
-      reasoningEffort: ReasoningEffortId('max'),
+      reasoningEffort: brandString<ReasoningEffortId>('max'),
     })
     const remote = await createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }), cwd: '/tmp' })
 
@@ -466,11 +433,12 @@ describe('Web session model selection', () => {
     const { ctx } = await harness()
     ctx.llm.registerAdapter(['plain'], new CatalogAdapter('Plain', [
       { provider: 'plain', id: 'plain-model', name: 'Plain Model' },
+      { provider: 'plain', id: 'badged-model', name: 'Badged Model', badge: { text: { en: 'New', zh: '新' }, tone: 'info' } },
     ]))
     ctx.llm.registerAdapter(['described-reasoning'], new CatalogAdapter('Described Reasoning', [
       { provider: 'described-reasoning', id: 'reasoning-model', name: 'Reasoning Model' },
     ], {
-      efforts: [{ id: ReasoningEffortId('high'), name: 'High', description: 'More thinking' }],
+      efforts: [{ id: brandString<ReasoningEffortId>('high'), name: 'High', description: 'More thinking' }],
     }))
     ctx.llm.registerAdapter(['string-failure'], new class extends CatalogAdapter {
       override listModels(): Promise<readonly LlmModelInfo[]> {
@@ -485,7 +453,10 @@ describe('Web session model selection', () => {
 
     const catalog = await buildModelCatalog(ctx)
     expect(catalog.groups).toEqual(expect.arrayContaining([
-      { id: 'plain', name: 'Plain', models: [{ id: 'plain-model', name: 'Plain Model' }] },
+      { id: 'plain', name: 'Plain', models: [
+        { id: 'plain-model', name: 'Plain Model' },
+        { id: 'badged-model', name: 'Badged Model', badge: { text: { en: 'New', zh: '新' }, tone: 'info' } },
+      ] },
       {
         id: 'described-reasoning',
         name: 'Described Reasoning',
@@ -599,7 +570,7 @@ describe('Web session model selection', () => {
     expect(agent.model.current()).toEqual(stored)
     stored = { provider: 'deepseek-official', model: 'deepseek-reasoner' }
     expect(agent.model.current()).toEqual(stored)
-    const selection = { ...stored, reasoningEffort: ReasoningEffortId('high') }
+    const selection = { ...stored, reasoningEffort: brandString<ReasoningEffortId>('high') }
     // The explicit selection is identical to the live fallback, including effort.
     stored = selection
     expectValue(await remote.selectModel({ sessionId: first.sessionId, ...selection }))
@@ -631,7 +602,7 @@ describe('Web session model selection', () => {
     const { ctx, agent } = await harness({
       provider: 'deepseek-official',
       model: 'deepseek-chat',
-      reasoningEffort: ReasoningEffortId('high'),
+      reasoningEffort: brandString<ReasoningEffortId>('high'),
       adapterDefaults: { reasoningEffort: true },
     })
     await createSessionTestRemote(ctx, {

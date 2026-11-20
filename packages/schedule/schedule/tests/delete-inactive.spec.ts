@@ -1,13 +1,15 @@
 /** Host-wide removal of every ended task shares per-row deletion's durability rules. */
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { MessageId } from '@deepseek-ai/dsh-llm/brand'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { MessageId } from '@deepseek-ai/dsh-llm/types'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { createAfterScheduleRecord, createEveryScheduleRecord, ScheduleId } from '../src/domain.ts'
+import { createAfterScheduleRecord, createEveryScheduleRecord } from '../src/domain.ts'
+import type { ScheduleId } from '../src/types.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { scheduleDomain, type ScheduleTask } from '../src/storage.ts'
+import { scheduleDomain, scheduleTaskSchema, type ScheduleTask } from '../src/storage.ts'
 import { StorageError } from '@deepseek-ai/dsh-storage'
 import { MemoryMediaPool } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
-import { gatedScheduleBackend, harness } from './harness.ts'
+import { agentFor, gatedScheduleBackend, harness } from './harness.ts'
 
 const tests: Awaited<ReturnType<typeof harness>>[] = []
 beforeEach(() => {
@@ -30,15 +32,15 @@ function endedRow(sessionId: SessionId, id: string, title: string): ScheduleTask
   const receipt = {
     scheduledAt: '2026-09-15T23:59:00.000Z',
     deliveredAt: '2026-09-15T23:59:01.000Z',
-    messageId: MessageId(`${id}-delivery`),
+    messageId: brandString<MessageId>(`${id}-delivery`),
   }
-  return {
-    sessionId,
-    record: createAfterScheduleRecord(ScheduleId(id), title, 60, Date.now(), title),
-    status: 'inactive',
+  return scheduleTaskSchema.parse({
+    target: { kind: 'session', sessionId },
+    record: createAfterScheduleRecord(brandString<ScheduleId>(id), title, 60, Date.now(), title),
+    status: 'ended',
     lastDelivery: receipt,
     deliveryHistory: { records: [receipt], earlierRecordsUnavailable: false },
-  }
+  })
 }
 
 /**
@@ -56,41 +58,46 @@ async function seeded(rows: readonly ScheduleTask[]) {
   return test
 }
 
-it('removes ended tasks across Sessions with their saved deliveries and keeps active ones', async () => {
-  const firstSession = SessionId('ended-first')
-  const secondSession = SessionId('ended-second')
-  const armedSession = SessionId('still-armed')
+it('removes ended tasks across Sessions with their saved deliveries and keeps active and paused ones', async () => {
+  const firstSession = brandString<SessionId>('ended-first')
+  const secondSession = brandString<SessionId>('ended-second')
+  const armedSession = brandString<SessionId>('still-armed')
   const endedFirst = endedRow(firstSession, 'ended-a', 'Ended first')
   const endedSecond = endedRow(secondSession, 'ended-b', 'Ended second')
-  const armed = createAfterScheduleRecord(ScheduleId('armed'), 'Still armed', 3_600, Date.now(), 'Still armed')
-  const test = await seeded([endedFirst, endedSecond, {
-    sessionId: armedSession, record: armed, status: 'active',
-  }])
+  const armed = createAfterScheduleRecord(brandString<ScheduleId>('armed'), 'Still armed', 3_600, Date.now(), 'Still armed')
+  const paused = { ...endedRow(armedSession, 'paused', 'Paused'), status: 'paused' as const }
+  const test = await seeded([endedFirst, endedSecond, paused, scheduleTaskSchema.parse({
+    target: { kind: 'session', sessionId: armedSession }, record: armed, status: 'active',
+  })])
   const { ctx, service, resolve } = test
+  const agents = [agentFor(ctx, firstSession), agentFor(ctx, secondSession)]
+  for (const agent of agents) await ctx.agents.register(agent)
   const changed = vi.fn()
   ctx.on('schedule/changed', changed)
 
   expect(await service.deleteInactive()).toEqual({ deleted: 2 })
 
-  expect((await service.catalog()).map(entry => entry.title)).toEqual(['Still armed'])
-  expect(await service.list({ sessionId: firstSession })).toEqual([])
+  expect((await service.catalog()).map(entry => entry.title).sort()).toEqual(['Paused', 'Still armed'])
+  expect((await service.list({ active: false })).items.map(entry => entry.id)).toEqual([paused.record.id])
   // The saved delivery records went with their rows, so history no longer resolves them.
-  expect(await service.history({ sessionId: firstSession, id: endedFirst.record.id, limit: 20 }))
+  expect(await service.history({ id: endedFirst.record.id, limit: 20 }))
     .toEqual({ id: endedFirst.record.id, code: 'schedule_not_found' })
-  expect(await service.history({ sessionId: secondSession, id: endedSecond.record.id, limit: 20 }))
+  expect(await service.history({ id: endedSecond.record.id, limit: 20 }))
     .toEqual({ id: endedSecond.record.id, code: 'schedule_not_found' })
   expect(changed).toHaveBeenCalledTimes(1)
   expect(resolve).not.toHaveBeenCalled()
-  expect(ctx.agents.roots()).toEqual([])
+  expect(ctx.agents.list()).toEqual(agents)
+  await test.fiber.dispose()
+  for (const agent of agents) expect(agent.inject).not.toHaveBeenCalled()
 })
 
 it('reports zero and announces nothing when the Host holds no ended task', async () => {
-  const sessionId = SessionId('only-active')
-  const test = await seeded([{
-    sessionId,
-    record: createAfterScheduleRecord(ScheduleId('armed'), 'Still armed', 3_600, Date.now(), 'Still armed'),
+  const sessionId = brandString<SessionId>('only-active')
+  const test = await seeded([scheduleTaskSchema.parse({
+    target: { kind: 'session', sessionId },
+    record: createAfterScheduleRecord(brandString<ScheduleId>('armed'), 'Still armed', 3_600, Date.now(), 'Still armed'),
     status: 'active',
-  }])
+  })])
   const { ctx, service } = test
   const changed = vi.fn()
   ctx.on('schedule/changed', changed)
@@ -123,15 +130,15 @@ it('clears a large ended set in one batch and stays idempotent across repeated c
       const now = Date.now()
       for (let index = 0; index < endedCount; index += 1) {
         const id = `ended-${index}`
-        await tasks.put(ScheduleId(id), endedRow(SessionId(`ended-session-${index}`), id, `Ended ${index}`))
+        await tasks.put(brandString<ScheduleId>(id), endedRow(brandString<SessionId>(`ended-session-${index}`), id, `Ended ${index}`))
       }
       for (let index = 0; index < activeCount; index += 1) {
         const id = `active-${index}`
-        await tasks.put(ScheduleId(id), {
-          sessionId: SessionId(`active-session-${index}`),
-          record: createEveryScheduleRecord(ScheduleId(id), `Active ${index}`, 3_600, now, `Active ${index}`),
+        await tasks.put(brandString<ScheduleId>(id), scheduleTaskSchema.parse({
+          target: { kind: 'session', sessionId: brandString<SessionId>(`active-session-${index}`) },
+          record: createEveryScheduleRecord(brandString<ScheduleId>(id), `Active ${index}`, 3_600, now, `Active ${index}`),
           status: 'active',
-        })
+        }))
       }
       await domain.close()
     },
@@ -157,7 +164,7 @@ it('clears a large ended set in one batch and stays idempotent across repeated c
   for (let round = 0; round < rounds; round += 1) {
     for (let index = 0; index < reseeded; index += 1) {
       const id = `again-${round}-${index}`
-      await table!.put(ScheduleId(id), endedRow(SessionId(`again-session-${round}-${index}`), id, `Again ${round}-${index}`))
+      await table!.put(brandString<ScheduleId>(id), endedRow(brandString<SessionId>(`again-session-${round}-${index}`), id, `Again ${round}-${index}`))
     }
     expect(await service.deleteInactive()).toEqual({ deleted: reseeded })
     expect(await service.catalog()).toHaveLength(activeCount)
@@ -182,8 +189,8 @@ it('reports the batch failure', async () => {
     backend,
     beforeService: async (_ctx, facility) => {
       const domain = await facility.open(scheduleDomain)
-      await domain.table('tasks').put(ScheduleId('ended-a'), endedRow(SessionId('partial-a'), 'ended-a', 'Partial first'))
-      await domain.table('tasks').put(ScheduleId('ended-b'), endedRow(SessionId('partial-b'), 'ended-b', 'Partial second'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-a'), endedRow(brandString<SessionId>('partial-a'), 'ended-a', 'Partial first'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-b'), endedRow(brandString<SessionId>('partial-b'), 'ended-b', 'Partial second'))
       await domain.close()
     },
   })
@@ -219,8 +226,8 @@ it('quarantines the Host domain when the backend reports unknown-state', async (
     backend,
     beforeService: async (_ctx, facility) => {
       const domain = await facility.open(scheduleDomain)
-      await domain.table('tasks').put(ScheduleId('ended-a'), endedRow(SessionId('quarantine-a'), 'ended-a', 'Quarantine first'))
-      await domain.table('tasks').put(ScheduleId('ended-b'), endedRow(SessionId('quarantine-b'), 'ended-b', 'Quarantine second'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-a'), endedRow(brandString<SessionId>('quarantine-a'), 'ended-a', 'Quarantine first'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-b'), endedRow(brandString<SessionId>('quarantine-b'), 'ended-b', 'Quarantine second'))
       await domain.close()
     },
   })
@@ -257,8 +264,8 @@ it('reports a rejection reason that carries no Error as a labeled Error', async 
     backend,
     beforeService: async (_ctx, facility) => {
       const domain = await facility.open(scheduleDomain)
-      await domain.table('tasks').put(ScheduleId('ended-a'), endedRow(SessionId('unreportable-a'), 'ended-a', 'Unreportable first'))
-      await domain.table('tasks').put(ScheduleId('ended-b'), endedRow(SessionId('unreportable-b'), 'ended-b', 'Unreportable second'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-a'), endedRow(brandString<SessionId>('unreportable-a'), 'ended-a', 'Unreportable first'))
+      await domain.table('tasks').put(brandString<ScheduleId>('ended-b'), endedRow(brandString<SessionId>('unreportable-b'), 'ended-b', 'Unreportable second'))
       await domain.close()
     },
   })

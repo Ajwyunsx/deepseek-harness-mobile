@@ -4,7 +4,7 @@
  * @module @deepseek-ai/dsh-tool-executor-ptc/types
  */
 
-import type { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm/types'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
@@ -64,7 +64,7 @@ declare module '@deepseek-ai/dsh-session/types' {
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** Images deferred from a successful PTC subcall's final result. */
+    /** PTC context, including deferred subcall images and host environment-reset notices. */
     'ptc-mode': { kind: 'ptc-mode' }
   }
 }

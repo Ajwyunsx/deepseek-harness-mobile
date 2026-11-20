@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { SESSION_FORMAT_VERSION, Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, Session, type SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { scheduleDomain } from '@deepseek-ai/dsh-schedule'
 import { createSessionFormatCatalogWithChildren } from '@deepseek-ai/dsh-session-format-catalog'
 import {
@@ -22,6 +22,7 @@ import {
   VFS_EXAMPLE_TAIL_MESSAGE,
   VFS_EXAMPLE_TITLE,
 } from './vfs-example-fixture.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 function filesUnder(root: string): string[] {
   const files: string[] = []
@@ -137,20 +138,21 @@ describe('WebWorker preview VFS example', () => {
     })
   })
 
-  it('seeds Host Schedule tasks the whole-unit domain accepts', () => {
-    const path = 'home/storages/schedule.json'
-    const text = buildVfsExampleFiles().get(path)
-    if (text === undefined) throw new Error(`missing generated preview Schedule storage ${path}`)
-    const document = JSON.parse(text) as {
+  it('seeds Host Schedule tasks in the authoritative versioned whole-unit store', () => {
+    const files = buildVfsExampleFiles()
+    const document = JSON.parse(files.get(`home/storages/${scheduleDomain.name}.json`)!) as {
       unit: { name: string; version: number }
+      global: null
       tables: { tasks: Record<string, unknown> }
     }
-    expect(document.unit).toEqual({ name: scheduleDomain.name, version: scheduleDomain.version })
+    expect(document.unit).toEqual({ name: 'schedule', version: scheduleDomain.version })
+    expect(document.global).toBeNull()
     for (const id of Object.values(VFS_EXAMPLE_SCHEDULE_IDS)) {
       const task = scheduleDomain.tables.tasks.valueSchema.parse(document.tables.tasks[id])
       expect(task.record.id).toBe(id)
       expect(task.record.title.trim().length).toBeGreaterThan(0)
       expect(task.status).toBe('active')
+      expect(task.target).toEqual({ kind: 'session', sessionId: VFS_EXAMPLE_SESSION_IDS.main })
       expect(Date.parse(task.record.scheduledAt)).toBeGreaterThan(Date.now())
     }
   })
@@ -166,7 +168,7 @@ describe('WebWorker preview VFS example', () => {
     expect(events.map(event => event.seq)).toEqual(events.map((_, index) => index))
     expect(events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     expect(() => Session.fromRestore(
-      SessionId(meta.id),
+      brandString<SessionId>(meta.id),
       events,
       meta,
       inheritedEventCount,
@@ -270,7 +272,7 @@ describe('WebWorker preview VFS example', () => {
       expect(events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
       expect(foldSubagentDescriptor(events.slice(inheritedEventCount))).toMatchObject({ mode })
       expect(() => Session.fromRestore(
-        SessionId(meta.id),
+        brandString<SessionId>(meta.id),
         events,
         meta,
         inheritedEventCount,

@@ -3,6 +3,8 @@
  * The account takeover inside the shipped composition: the frame-wide notice
  * chain, the account settings page, and the one shared native Platform host.
  */
+import { syncedConfig } from '@deepseek-ai/dsh-client-test-runtime'
+import { apply as applyMenus, inject as injectMenus } from '@deepseek-ai/dsh-client-ui-context-menu/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen } from '@testing-library/react'
@@ -65,7 +67,7 @@ function sectionOperations(account: AccountSnapshot, pages: PlatformPages): Acco
     openPlatformPage: pages.open,
     refreshAccount: async () => {},
     avatarFailed: () => {},
-    bonusNoticeShown: () => {}, bonusNoticeDismissed: () => {},
+
     hasRunningAccountTasks: async () => false,
     contactUs: () => {}, showLogin: () => {}, setOnboarding: () => {},
     start: async () => {}, cancel: async () => {}, signOut: async () => {},
@@ -109,6 +111,8 @@ async function bench() {
   runtime.remote.provideNamespaces({ session: { openWorkspacePath: async () => ({ ok: true, value: { opened: true } }) } })
   const locale = new LocaleRuntime(runtime.ctx)
   runtime.ctx.provide('locale', locale)
+  runtime.ctx.provide('shortcuts', { catalog: createSnapshotStore([]) })
+  await runtime.mount({ apply: applyMenus, inject: injectMenus }, syncedConfig({ resolutionTimeoutMs: 1000 }))
   runtime.slots.installLocale(locale)
   runtime.ctx.effect(() => locale.register('settings.account', { en, zh }), 'spec: account dictionaries')
   await runtime.declare({
@@ -116,7 +120,7 @@ async function bench() {
     'settings.section': { kind: 'list', scope: 'root' },
     'conversation.approval.detail': { kind: 'single', scope: 'session' },
   })
-  await runtime.mount({ inject: [...injectConversation], apply: applyConversation })
+  await runtime.mount({ inject: [...injectConversation], apply: applyConversation }, syncedConfig({ busyEnter: 'queue', maxConcurrentFileUploads: 2 }))
   let descriptor: Parameters<typeof runtime.ctx.uiSession.provide>[0] | undefined
   const provide = runtime.ctx.uiSession.provide.bind(runtime.ctx.uiSession)
   runtime.ctx.uiSession.provide = (next) => { descriptor ??= next; return provide(next) }

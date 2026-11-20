@@ -1,17 +1,21 @@
 /**
  * Service Definition for the web access capability seam (`ctx.web`): registries and provider-selecting execution for search and
  * fetch. Duplicate ids are rejected. At execution time, a configured provider must exist and
- * be usable; without one, exactly one usable provider is required, so selection never depends
- * on registration order.
+ * be usable; without one, exactly one usable provider is required, except that a search prefers the
+ * usable DeepSeek provider assigned to the route of the model request it serves, so selection never
+ * depends on registration order.
  * @module @deepseek-ai/dsh-web
  */
 
-import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
+import { Context, type Volatile } from '@deepseek-ai/cordis'
+import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import z from '@deepseek-ai/schemastery'
 import type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebProviderInfo,
+  WebProviderList,
   WebSearchProvider,
   WebSearchRequest,
   WebSearchResult,
@@ -26,6 +30,8 @@ export type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebProviderInfo,
+  WebProviderList,
   WebSearchProvider,
   WebSearchRequest,
   WebSearchResult,
@@ -44,7 +50,21 @@ interface Selection<P> {
   readonly configuredId?: string
   /** Providers registered for this capability kind. */
   readonly providers: ReadonlyMap<string, P>
+  /** The provider that wins among the usable ones while none is configured, if it is usable. */
+  readonly preferredId?: string
 }
+
+/** Provider routes of the DeepSeek API-key and account models. */
+const DEEPSEEK_MODEL_ROUTES: ReadonlySet<string> = new Set(['deepseek-official', 'deepseek-account'])
+
+/**
+ * Search provider preferred for a model request on a DeepSeek model route while none is configured: DeepSeek
+ * Messages search, which DeepSeek serves without a per-search charge.
+ */
+const DEEPSEEK_ROUTE_SEARCH_PROVIDER = 'deepseek-official'
+
+/** Search provider preferred on every other route and outside a model request while none is configured. */
+const OTHER_ROUTE_SEARCH_PROVIDER = 'deepseek-search-api'
 
 /**
  * Config for the web seam. `searchProvider` / `fetchProvider` pin which provider
@@ -55,25 +75,33 @@ interface Selection<P> {
  * fields rather than introduce a hidden priority chain.
  */
 export interface WebRuntimeConfig {
-  /** Explicit search provider id. Omitted = auto-select when exactly one usable. */
+  /**
+   * Explicit search provider id. Omitted = the usable DeepSeek provider assigned to the route of the model
+   * request, and otherwise auto-select when exactly one usable.
+   */
   readonly searchProvider: Volatile<string | undefined>
   /** Explicit fetch provider id. Omitted = auto-select when exactly one usable. */
   readonly fetchProvider: Volatile<string | undefined>
 }
 
 /**
- * The web access service. Registered as `ctx.web` (one instance per context).
+ * The web access service. Registered as `ctx.web` (one instance per context)
+ * and exposed to Clients as the `web` Remote namespace (`listProviders`).
  *
  * Selection semantics (resolved at execution time, never order-dependent):
  * - A configured id that is registered and `available()` → that provider.
  * - A configured id not registered → `WEB_PROVIDER_CONFIGURED_MISSING`.
  * - A configured id registered but unavailable →
  *   `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`.
+ * - No search id configured, and the provider assigned to the route of the model request
+ *   the search serves is usable → that provider: `deepseek-official` (Messages search) on the
+ *   `deepseek-official` and `deepseek-account` routes, `deepseek-search-api` on every other
+ *   route and outside a model request.
  * - No id configured, exactly one registered usable provider → that provider.
  * - No id configured, multiple usable providers → `WEB_PROVIDER_AMBIGUOUS`.
  * - No id configured, no usable provider → `WEB_PROVIDER_UNAVAILABLE`.
  */
-export class WebRuntime extends Service {
+export class WebRuntime extends TypertRemoteService {
   /**
    * Provider selection config. Operational env overrides feed the SAME fields:
    * `$DSH_WEB_SEARCH_PROVIDER` / `$DSH_WEB_FETCH_PROVIDER` are equivalent to
@@ -96,9 +124,11 @@ export class WebRuntime extends Service {
   }
 
   /**
-   * Register a search provider. Throws {@link WebError} `WEB_DUPLICATE_PROVIDER`
-   * if its id is already registered for search. Returns a disposer; disposed
-   * with the calling fiber.
+   * Register a search provider. `listProviders()` lists it until the
+   * registration is disposed, which happens with the calling fiber or through
+   * the returned disposer; registration and disposal each emit
+   * `web/providers-changed`. Throws {@link WebError} `WEB_DUPLICATE_PROVIDER`
+   * if its id is already registered for search.
    * @param provider - the provider; its `id` is the registry key.
    * @returns the disposer that unregisters the provider.
    */
@@ -107,9 +137,9 @@ export class WebRuntime extends Service {
   }
 
   /**
-   * Register a fetch provider. Throws {@link WebError} `WEB_DUPLICATE_PROVIDER`
-   * if its id is already registered for fetch. Returns a disposer; disposed
-   * with the calling fiber.
+   * Register a fetch provider, with the listing, disposal, and event behavior
+   * of {@link WebRuntime.registerSearchProvider}. Throws {@link WebError}
+   * `WEB_DUPLICATE_PROVIDER` if its id is already registered for fetch.
    * @param provider - the provider; its `id` is the registry key.
    * @returns the disposer that unregisters the provider.
    */
@@ -121,9 +151,14 @@ export class WebRuntime extends Service {
     if (store.has(provider.id)) {
       throw new WebError(`a web provider with id "${provider.id}" is already registered`, 'WEB_DUPLICATE_PROVIDER')
     }
+    const emitChanged = (): void => { this.emitProvidersChanged() }
     const dispose = this.ctx.effect(function* () {
       store.set(provider.id, provider)
-      yield () => store.delete(provider.id)
+      emitChanged()
+      yield () => {
+        store.delete(provider.id)
+        emitChanged()
+      }
     }, 'web.registerProvider()')
     // ctx.effect's disposer returns Promise<void>; our disposer API is
     // synchronous fire-and-forget — discard the (always-resolved) promise.
@@ -131,16 +166,46 @@ export class WebRuntime extends Service {
   }
 
   /**
+   * List every registered search and fetch provider for provider pickers.
+   * Availability does not filter the lists.
+   * @returns detached `{ id, title, description }` entries per capability, in registration order.
+   */
+  @Remote
+  listProviders(): WebProviderList {
+    return {
+      search: [...this.searchProviders.values()].map(providerInfo),
+      fetch: [...this.fetchProviders.values()].map(providerInfo),
+    }
+  }
+
+  /** Emit `web/providers-changed`, containing each listener's failure so none vetoes the mutation. */
+  private emitProvidersChanged(): void {
+    for (const listener of this.ctx.events.dispatch('emit', ['web/providers-changed'])) {
+      try {
+        const returned: unknown = listener()
+        void Promise.resolve(returned).catch((error: unknown) => { this.warnListenerFailure(error) })
+      } catch (error: unknown) {
+        this.warnListenerFailure(error)
+      }
+    }
+  }
+
+  private warnListenerFailure(error: unknown): void {
+    this.ctx.logger.warn('web: a web/providers-changed listener failed')
+    this.ctx.logger.warn(error)
+  }
+
+  /**
    * Run one search through the selected provider. Resolves the provider at call
    * time with the selection rules above; throws {@link WebError} when the
    * capability cannot run. The seam enforces `request.maxResults` on the result:
    * if the provider over-returns, `sources[]` is truncated and `truncated` set.
-   * @param request - the query and optional result limit.
+   * @param request - the query, the optional result limit, and the route of the model request the search serves.
    * @param signal - optional cancellation signal forwarded to the provider.
    * @returns the provider's results, capped to `request.maxResults`.
    */
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
-    const result = await this.selectSearchProvider().search(request, signal)
+    const result = await this.selectSearchProvider(request.llmProvider).search(request, signal)
     return capSources(result, request.maxResults)
   }
 
@@ -153,14 +218,22 @@ export class WebRuntime extends Service {
    * @returns false only when the selected provider reports that it cannot authenticate.
    */
   async searchReady(llmProvider?: string): Promise<boolean> {
-    return await selectedProviderReady(() => this.selectSearchProvider(), llmProvider)
+    return await selectedProviderReady(() => this.selectSearchProvider(llmProvider), llmProvider)
   }
 
-  /** Select the search provider with the rules above, throwing the matching {@link WebError}. */
-  private selectSearchProvider(): WebSearchProvider {
+  /**
+   * Select the search provider with the rules above, throwing the matching {@link WebError}.
+   * @param llmProvider - provider route id of the model request the search serves, when known.
+   * @returns the provider the search runs through.
+   */
+  private selectSearchProvider(llmProvider: string | undefined): WebSearchProvider {
     const configuredId = this.config.searchProvider.get() ?? this.searchProviderEnv
+    const preferredId = llmProvider !== undefined && DEEPSEEK_MODEL_ROUTES.has(llmProvider)
+      ? DEEPSEEK_ROUTE_SEARCH_PROVIDER
+      : OTHER_ROUTE_SEARCH_PROVIDER
     return resolveProvider({
       providers: this.searchProviders,
+      preferredId,
       ...configuredId !== undefined ? { configuredId } : {},
     })
   }
@@ -199,6 +272,15 @@ export class WebRuntime extends Service {
   }
 }
 
+/** Project one provider to its picker entry, omitting an absent title or description. */
+function providerInfo(provider: WebSearchProvider | WebFetchProvider): WebProviderInfo {
+  return {
+    id: provider.id,
+    ...provider.title === undefined ? {} : { title: provider.title },
+    ...provider.description === undefined ? {} : { description: provider.description },
+  }
+}
+
 interface ResolvableProvider {
   readonly id: string
   available(): boolean
@@ -233,6 +315,8 @@ function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>):
     return provider
   }
   const usable = [...providers.values()].filter(provider => provider.available())
+  const preferred = usable.find(provider => provider.id === selection.preferredId)
+  if (preferred !== undefined) return preferred
   const [single] = usable
   if (single === undefined) {
     throw new WebError('no usable web provider is registered', 'WEB_PROVIDER_UNAVAILABLE')

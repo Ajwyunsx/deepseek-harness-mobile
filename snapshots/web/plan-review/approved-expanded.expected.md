@@ -1,6 +1,7 @@
 - banner:
   - navigation "Session hierarchy": "Plan a small change: add"
   - text: Standard mode
+  - button "Session panel"
   - button "More actions"
   - tablist:
     - tab "Chat" [selected]
@@ -11,6 +12,9 @@
 - status: Completed
 - button "Completed in {{duration}}" [expanded]
 - button "Analysis completed" [expanded]
+- button "Context injection runtime-context"
+- button "Context injection skill-catalog"
+- button "Context injection time-context"
 - 'button "Think The user wants me to plan a small change to add a `--greeting` flag to a CLI. They explicitly told me not to read or write any files, and to call exit_plan_mode with a short plan. Let me do that directly."'
 - paragraph:
   - text: Since the user has explicitly asked me not to read or write any files and to go straight to planning, I'll proceed with

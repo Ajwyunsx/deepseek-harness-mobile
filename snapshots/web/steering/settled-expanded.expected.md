@@ -1,6 +1,7 @@
 - banner:
   - navigation "Session hierarchy": Use the ask_user_question tool to
   - text: Standard mode
+  - button "Session panel"
   - button "More actions"
   - button "Open right sidebar"
   - tablist:
@@ -12,6 +13,9 @@
 - status: Completed
 - button "Completed in {{duration}}" [disabled]
 - button "Asked questions" [expanded]
+- button "Context injection runtime-context"
+- button "Context injection skill-catalog"
+- button "Context injection time-context"
 - button "Ask question 1/1 answered"
 - group "Questions and answers":
   - term: Checkpoint Ready to continue?

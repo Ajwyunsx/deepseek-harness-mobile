@@ -1,6 +1,7 @@
 - banner:
   - navigation "Session hierarchy": Use read_image to inspect red.png.
   - text: Minimal mode
+  - button "Session panel"
   - button "More actions"
   - button "Open right sidebar"
   - tablist:
@@ -12,6 +13,7 @@
 - status: Completed
 - button "Completed in {{duration}}" [expanded]
 - button "Read images" [expanded]
+- button "Context injection runtime-context"
 - button "Read image red.png" [expanded]:
   - text: Read image
   - button "red.png"

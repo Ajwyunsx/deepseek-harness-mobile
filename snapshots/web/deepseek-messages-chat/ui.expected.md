@@ -1,6 +1,7 @@
 - banner:
   - navigation "会话层级": 只回复 MESSAGES_WEB_READY，不调用
   - text: 标准模式
+  - button "会话面板"
   - button "更多操作"
   - button "打开右侧边栏"
   - tablist:
@@ -10,7 +11,7 @@
 - text: 只回复 MESSAGES_WEB_READY，不调用工具。 {{clock}}
 - button "复制"
 - status: 已完成
-- button "已完成，用时 {{duration}}" [disabled]
+- button "已完成，用时 {{duration}}"
 - paragraph: MESSAGES_WEB_READY
 - button "复制"
 - button "好的回答"

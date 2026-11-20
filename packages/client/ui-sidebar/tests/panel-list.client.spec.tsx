@@ -71,7 +71,7 @@ async function bench(collapsed = false, track?: TrackProductEvent) {
     const activePanelId = usePanelInfo(info => info.activePanelId)
     return (
       <>
-        <aside>{renderSlot('sidebar', { collapsed, width: collapsed ? 56 : 300 })}</aside>
+        <aside>{renderSlot('sidebar', { collapsed, width: collapsed ? 56 : 300, drawer: false })}</aside>
         <main>{renderSlot('main', {}, { entryKey: activePanelId ?? 'conversation' })}</main>
       </>
     )
@@ -358,15 +358,23 @@ describe('sidebar launcher pins', () => {
     expect(within(navigation).getAllByRole('button').map(row => row.textContent)).toEqual(['Beta panel', 'Alpha panel'])
   })
 
-  it('shows More after the rows only while the actions list has registrations', async () => {
+  it('shows More and hides unpinned rows only while the actions list has registrations', async () => {
     const { runtime, locale, view } = await bench()
     const probe = await mountProbeActions(runtime)
     expect(view.queryByRole('navigation')).toBeNull()
     await mountPanels(runtime, locale)
     const navigation = await view.findByRole('navigation', { name: 'Global panels' })
-    expect(within(navigation).getAllByRole('button').map(row => row.getAttribute('aria-label'))).toEqual(['Beta panel', 'Alpha panel', 'More'])
+    expect(within(navigation).getAllByRole('button').map(row => row.getAttribute('aria-label')))
+      .toEqual(['Beta panel', 'Unpin Beta panel from sidebar', 'Alpha panel', 'Unpin Alpha panel from sidebar', 'More'])
+    fireEvent.click(within(navigation).getByRole('button', { name: 'Unpin Alpha panel from sidebar' }))
+    expect(within(navigation).queryByRole('button', { name: 'Alpha panel' })).toBeNull()
+    expect(document.activeElement).toBe(within(navigation).getByRole('button', { name: 'More' }))
     await probe.dispose()
     await waitFor(() => { expect(within(navigation).queryByRole('button', { name: 'More' })).toBeNull() })
+    expect(within(navigation).getAllByRole('button').map(row => row.getAttribute('aria-label'))).toEqual(['Beta panel', 'Alpha panel'])
+    await mountProbeActions(runtime)
+    await waitFor(() => { expect(within(navigation).queryByRole('button', { name: 'Alpha panel' })).toBeNull() })
+    expect(within(navigation).getByRole('button', { name: 'More' })).toBeTruthy()
   })
 
   it.each([false, true])('opens, pins, and dismisses through the More menu with collapsed=%s', async (collapsed) => {
@@ -395,6 +403,11 @@ describe('sidebar launcher pins', () => {
     fireEvent.click(menu.getByRole('menuitem', { name: 'Pin Alpha panel' }))
     const alphaRow = await within(navigation).findByRole('button', { name: 'Alpha panel' })
     expect(alphaRow.getAttribute('aria-current')).toBe('page')
+    fireEvent.click(menu.getByRole('menuitem', { name: 'Unpin Beta panel' }))
+    fireEvent.click(menu.getByRole('menuitem', { name: 'Pin Beta panel' }))
+    expect(within(navigation).getAllByRole('button').map(row => row.getAttribute('aria-label'))
+      .filter(label => !label?.startsWith('Unpin ')))
+      .toEqual(['Plugins', 'Beta panel', 'Alpha panel', 'More'])
     fireEvent.click(menu.getByRole('menuitem', { name: 'Unpin Alpha panel' }))
     await waitFor(() => { expect(within(navigation).queryByRole('button', { name: 'Alpha panel' })).toBeNull() })
     expect(view.getByRole('heading', { name: 'Alpha content' })).toBeTruthy()
@@ -496,5 +509,70 @@ describe('sidebar entry click analytics', () => {
     fireEvent.click(view.getByRole('menuitem', { name: 'Open Automation by id' }))
     expect(track).toHaveBeenLastCalledWith('sidebar_menu_click', { menu_name: 'cron', position: 'sidebar_more' })
     expect(layout.selectPanel).not.toHaveBeenCalled()
+  })
+})
+
+/** Trailing content that names the row state it receives; its visible count is decorative and its text describes the row. */
+function Count({ wide, active }: PropsRuntime<'sidebar.panellist.trailing'>) {
+  return (
+    <span data-testid="count" data-wide={wide} data-active={active}>
+      <span aria-hidden="true">{wide ? '6' : '•'}</span>
+      <span>6 waiting</span>
+    </span>
+  )
+}
+
+async function mountCount(runtime: SlotTestRuntime, id: MainPanelId) {
+  return runtime.mount({
+    inject: ['slots'],
+    apply(ctx: Context) {
+      ctx.slots.inject('sidebar.panellist.trailing', () => ctx.slots.register({ name: 'sidebar.panellist.trailing', id }, Count))
+    },
+  })
+}
+
+describe('sidebar panel trailing content', () => {
+  it('shows a panel registration in its own row only, describing the row button, and follows the selection', async () => {
+    const { runtime, locale, view } = await bench()
+    await mountPanels(runtime, locale)
+    await mountCount(runtime, ALPHA)
+
+    const alpha = await view.findByRole('button', { name: 'Alpha panel' })
+    const beta = view.getByRole('button', { name: 'Beta panel' })
+    expect(alpha.getAttribute('aria-describedby')).not.toBeNull()
+    const described = document.getElementById(alpha.getAttribute('aria-describedby') ?? '')
+    expect(described?.textContent).toBe('66 waiting')
+    expect(within(described as HTMLElement).getByTestId('count').dataset).toMatchObject({ wide: 'true', active: 'false' })
+    expect(document.getElementById(beta.getAttribute('aria-describedby') ?? '')?.textContent).toBe('')
+    expect(view.getAllByTestId('count')).toHaveLength(1)
+    // The content sits inside the row button after its title; the slot wrappers are inline spans, so nesting stays valid.
+    expect(alpha.contains(described)).toBe(true)
+    expect(described?.previousElementSibling?.textContent).toBe('Alpha panel')
+    const wrappers = [...(described?.querySelectorAll('[data-slot]') ?? [])]
+    expect(wrappers.length).toBeGreaterThan(0)
+    expect(wrappers.every(wrapper => wrapper.tagName === 'SPAN')).toBe(true)
+    expect(described?.querySelector('div')).toBeNull()
+
+    fireEvent.click(alpha)
+    await waitFor(() => { expect(view.getByTestId('count').dataset.active).toBe('true') })
+  })
+
+  it('tells the collapsed rail it is not wide', async () => {
+    const { runtime, locale, view } = await bench(true)
+    await mountPanels(runtime, locale)
+    await mountCount(runtime, BETA)
+
+    await waitFor(() => { expect(view.getByTestId('count').dataset.wide).toBe('false') })
+  })
+
+  it('removes the content when its registering fiber is disposed', async () => {
+    const { runtime, locale, view } = await bench()
+    await mountPanels(runtime, locale)
+    const count = await mountCount(runtime, ALPHA)
+    await view.findByTestId('count')
+
+    await act(async () => { await count.dispose() })
+    expect(view.queryByTestId('count')).toBeNull()
+    expect(view.getByRole('button', { name: 'Alpha panel' })).toBeTruthy()
   })
 })

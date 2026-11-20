@@ -1,6 +1,7 @@
+import { PROGRAM_PROTOCOL_VERSION } from '../src/protocol.ts'
 import { setImmediate } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { PtcBindingFunction, PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime'
@@ -8,12 +9,13 @@ import type { Config } from '../src/index.ts'
 import { mountRuntime } from './setup.ts'
 import { fakeChild, NO_INITIAL_FRAME } from './fake-child.ts'
 import { encodePtcJsonWire } from '../src/json-wire.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 const request: PtcRunRequest = { program: '1', bindings: [], stateOwner: {} }
 async function setup(config: Config = {}) {
   const ctx = new Context()
   onTestFinished(async () => { await ctx.fiber.dispose() })
-  const { runtime, fiber } = await mountRuntime(ctx, { ...config, executionMode: config.executionMode ?? 'persistent-in-memory' })
+  const { runtime, fiber } = await mountRuntime(ctx, { replScoped: false, ...config, executionMode: config.executionMode ?? 'persistent-in-memory' })
   return { ctx, fiber, runtime, ...fakeChild(ctx, runtime, request) }
 }
 
@@ -22,7 +24,7 @@ const bound: PtcRunRequest = { ...request, bindings: [{ global: 'tools', functio
 
 it.each(['per-call', 'persistent-in-memory'] as const)('cancels a %s call when its Session policy changes before process launch', async (executionMode) => {
   const h = await setup({ executionMode })
-  const session = h.ctx.sessions.create(SessionId('policy-admission'))
+  const session = h.ctx.sessions.create(brandString<SessionId>('policy-admission'))
   const policy = h.ctx.sandboxPolicy.resolve({ session })
   expect(policy.mode).toBe('danger-full-access')
   h.receive((message) => {
@@ -47,7 +49,7 @@ it.each(['per-call', 'persistent-in-memory'] as const)('cancels a %s call when i
 
 it.each(['per-call', 'persistent-in-memory'] as const)('keeps an approved wider %s call when the standing mode is unchanged', async (executionMode) => {
   const h = await setup({ executionMode })
-  const session = h.ctx.sessions.create(SessionId('temporary-admission'))
+  const session = h.ctx.sessions.create(brandString<SessionId>('temporary-admission'))
   setSandboxMode(session, 'read-only')
   const standing = h.ctx.sandboxPolicy.resolve({ session })
   h.receive((message) => {
@@ -68,7 +70,7 @@ it.each(['per-call', 'persistent-in-memory'] as const)('keeps an approved wider 
 
 it.each(['per-call', 'persistent-in-memory'] as const)('keeps a %s call canceled when policy changes back during earlier cleanup', async (executionMode) => {
   const h = await setup({ executionMode })
-  const session = h.ctx.sessions.create(SessionId('waiting-admission'))
+  const session = h.ctx.sessions.create(brandString<SessionId>('waiting-admission'))
   const booted = Promise.withResolvers<undefined>()
   const cleaning = Promise.withResolvers<undefined>()
   const cleanup = Promise.withResolvers<boolean>()
@@ -98,11 +100,17 @@ it.each(['per-call', 'persistent-in-memory'] as const)('keeps a %s call canceled
   }
 })
 
-it('rejects a retained call when its provider unloads during earlier policy cleanup', async () => {
-  const h = await setup()
-  const session = h.ctx.sessions.create(SessionId('unloading-admission'))
-  h.onBoot(() => { h.complete({}) })
-  await h.start({ ...request, sandboxPolicy: h.ctx.sandboxPolicy.resolve({ session }) })
+it.each(['persistent-in-memory', 'per-call'] as const)('rejects admission when %s unloads during earlier policy cleanup', async (executionMode) => {
+  const h = await setup({ executionMode })
+  const session = h.ctx.sessions.create(brandString<SessionId>('unloading-admission'))
+  const entered: PromiseWithResolvers<void> = Promise.withResolvers()
+  h.onBoot(() => {
+    if (executionMode === 'persistent-in-memory') h.complete({})
+    entered.resolve()
+  })
+  const first = h.start({ ...request, sandboxPolicy: h.ctx.sandboxPolicy.resolve({ session }) })
+  await entered.promise
+  if (executionMode === 'persistent-in-memory') await first
   const cleaning = Promise.withResolvers<undefined>()
   const cleanup = Promise.withResolvers<boolean>()
   h.waitForExit.mockImplementation(() => { cleaning.resolve(undefined); return cleanup.promise })
@@ -111,11 +119,12 @@ it('rejects a retained call when its provider unloads during earlier policy clea
   const pending = h.runtime.run(h.runtime.resolve({
     ...request, stateOwner: {}, sandboxPolicy: h.ctx.sandboxPolicy.resolve({ session }),
   }))
-  const rejected = expect(pending).rejects.toThrow('persistent PTC: run after disposal')
+  const prefix = executionMode === 'per-call' ? 'ptc-runtime-node' : 'persistent PTC'
+  const rejected = expect(pending).rejects.toThrow(`${prefix}: run after disposal`)
   const closing = h.fiber.dispose()
   try {
     await vi.waitFor(() => {
-      expect(() => h.runtime.resolve(request)).toThrow('persistent PTC: resolve after disposal')
+      expect(() => h.runtime.resolve(request)).toThrow(`${prefix}: resolve after disposal`)
     })
     expect(h.spawn).toHaveBeenCalledOnce()
     cleanup.resolve(true)
@@ -125,8 +134,80 @@ it('rejects a retained call when its provider unloads during earlier policy clea
     expect(h.spawn).toHaveBeenCalledOnce()
   } finally {
     cleanup.resolve(true)
-    await Promise.allSettled([pending, rejected, closing])
+    await Promise.allSettled([first, pending, rejected, closing])
   }
+})
+
+it('requires Host acceptance before a newly initialized environment can succeed', async () => {
+  const h = await setup()
+  onTestFinished(h.runtime.registerEnvironmentInitializer(''))
+  h.onBoot(() => { h.complete({ value: encodePtcJsonWire(42) }) })
+  const result = await h.start()
+  expect(result.error?.kind).toBe('protocol')
+  expect(result.error?.message).toContain('without Host acceptance')
+  expect(h.terminate).toHaveBeenCalledOnce()
+  expect(h.waitForExit).toHaveBeenCalledOnce()
+})
+
+it.each([false, true])('rejects unsolicited initialization acceptance with readiness %s', async (ready) => {
+  const h = await setup()
+  const acknowledgement = { t: 'q', i: 'initialized', m: 'initialized', a: [] }
+  h.onBoot(() => { h.emit(acknowledgement) })
+  const result = ready ? await h.start() : await h.start(request, acknowledgement)
+  expect(result.error?.kind).toBe('protocol')
+  expect(result.error?.message).toContain('unexpected environment initialization')
+})
+
+it('keeps failed initializer removal closed until cleanup is retried', async () => {
+  const h = await setup()
+  const remove = h.runtime.registerEnvironmentInitializer('')
+  onTestFinished(remove)
+  h.receive((message) => {
+    if (typeof message !== 'object' || message === null) return
+    if ('m' in message && message.m === 'run') h.emit({ t: 'q', i: 'initialized', m: 'initialized', a: [] })
+    else if ('t' in message && message.t === 's' && 'i' in message && message.i === 'initialized') h.complete({})
+  })
+  expect((await h.start()).error).toBeUndefined()
+  const failure = new Error('initializer cleanup failed')
+  h.waitForExit.mockRejectedValue(failure)
+  try {
+    await expect(remove()).rejects.toBe(failure)
+    await expect(h.runtime.run(h.runtime.resolve(request))).rejects.toThrow('cleanup is incomplete')
+    h.waitForExit.mockResolvedValue(true)
+    await remove()
+    await remove()
+    expect(h.waitForExit).toHaveBeenCalledTimes(2)
+  } finally { h.waitForExit.mockResolvedValue(true); await remove() }
+})
+
+it('rejects registration once a run is admitted, before process readiness', async () => {
+  const h = await setup()
+  h.onBoot(() => { h.complete({}) })
+  const pending = h.start()
+  expect(() => h.runtime.registerEnvironmentInitializer('')).toThrow('before the first run')
+  expect((await pending).error).toBeUndefined()
+})
+
+it('waits for canceled startup when an initializer is removed', async () => {
+  const h = await setup()
+  const remove = h.runtime.registerEnvironmentInitializer('')
+  onTestFinished(remove)
+  const entered: PromiseWithResolvers<void> = Promise.withResolvers()
+  const lookup = Promise.withResolvers<string>()
+  h.resolveExecutable.mockImplementation(() => { entered.resolve(); return lookup.promise })
+  const pending = h.start(request, NO_INITIAL_FRAME)
+  await entered.promise
+  let removed = false
+  const closing = remove().then(() => { removed = true })
+  try {
+    await setImmediate()
+    expect(removed).toBe(false)
+    expect(h.spawn).not.toHaveBeenCalled()
+    lookup.resolve(process.execPath)
+    await closing
+    expect((await pending).error?.kind).toBe('abort')
+    expect(h.spawn).not.toHaveBeenCalled()
+  } finally { lookup.resolve(process.execPath); await closing; await pending }
 })
 
 describe('persistent PTC host protocol', () => {
@@ -142,7 +223,7 @@ describe('persistent PTC host protocol', () => {
     expect(h.waitForExit).toHaveBeenCalledTimes(1)
   })
 
-  it.each([{ error: { kind: 'other', message: '' } }, { error: { kind: 'exception', message: 1 } }])('rejects malformed results %j', async (raw) => {
+  it.each([{ outputTruncated: 'yes' }, { error: { kind: 'other', message: '' } }, { error: { kind: 'exception', message: 1 } }])('rejects malformed results %j', async (raw) => {
     const h = await setup()
     h.onBoot(() => { h.complete(raw) })
     expect((await h.start()).error?.kind).toBe('protocol')
@@ -167,8 +248,17 @@ describe('persistent PTC host protocol', () => {
     h.onBoot(() => { h.complete({ value: 'bad' }) })
     expect((await h.start()).error?.kind).toBe('invalid-output')
     const limited = await setup({ maxOutputBytes: 30 })
-    limited.onBoot(() => { limited.emit({ t: 'q', m: 'log', a: ['x'.repeat(100)] }) })
-    expect((await limited.start()).error?.kind).toBe('output-limit')
+    limited.onBoot(() => { limited.emit({ t: 'q', m: 'log', a: ['x'.repeat(100)] }); limited.complete({ value: encodePtcJsonWire(42) }) })
+    expect(await limited.start()).toMatchObject({ value: 42, outputTruncated: true })
+  })
+
+  it.each([undefined, encodePtcJsonWire(42), 'invalid wire'])('preserves a reported truncation flag with completion %j', async (value) => {
+    const h = await setup()
+    h.onBoot(() => { h.complete({ value, outputTruncated: true }) })
+    const result = await h.start()
+    expect(result.outputTruncated).toBe(true)
+    expect(result.error?.kind).toBe(value === 'invalid wire' ? 'invalid-output' : undefined)
+    expect(result.value).toBe(Array.isArray(value) ? 42 : undefined)
   })
 
   it('returns current binding successes, exceptions and unavailable bindings', async () => {
@@ -218,39 +308,40 @@ describe('persistent PTC host protocol', () => {
     expect(waiting.spawn).not.toHaveBeenCalled()
   })
 
-  it('captures active raw output and ignores bytes arriving while the environment is idle', async () => {
+  it('captures active native output and ignores output while idle', async () => {
     const h = await setup()
     h.onBoot(() => {
       h.stdout.write('stdout')
       h.stderr.write('stderr')
       h.complete({})
     })
-    expect(await h.start()).toMatchObject({ logs: ['stdout', 'stderr'] })
+    expect(await h.start()).toMatchObject({ output: [{ type: 'text', text: 'stdout' }, { type: 'text', text: 'stderr' }] })
     h.stdout.write('idle stdout')
     h.stderr.write('idle stderr')
     h.onBoot(() => { h.complete({}) })
-    expect(await h.start(request, NO_INITIAL_FRAME)).toMatchObject({ logs: [] })
+    expect(await h.start(request, NO_INITIAL_FRAME)).toMatchObject({ output: [] })
     expect(h.terminate).not.toHaveBeenCalled()
   })
 
-  it('clears retained resources when final diagnostic accounting detects an overflow', async () => {
+  it('preserves retained resources and the failure kind when a diagnostic is truncated', async () => {
     const h = await setup({ maxOutputBytes: 100 })
     h.onBoot(() => { h.complete({ error: { kind: 'exception', message: 'x'.repeat(1000) } }) })
     const result = await h.start()
-    expect(result.error?.kind).toBe('output-limit')
-    expect(result.error?.message).toContain('retained variables were cleared')
-    expect(h.terminate).toHaveBeenCalledTimes(1)
+    expect(result.error?.kind).toBe('exception')
+    expect(result.outputTruncated).toBe(true)
+    expect(result.error?.message).toBe('x'.repeat(96))
+    expect(h.terminate).not.toHaveBeenCalled()
   })
 
-  it('keeps the first outcome when raw output overflows beside a terminal frame', async () => {
+  it('keeps the completion when tagged output overflows beside a terminal frame', async () => {
     const h = await setup({ maxOutputBytes: 100 })
     h.onBoot(() => {
       h.complete({ value: encodePtcJsonWire(42) })
-      queueMicrotask(() => { h.stdout.write('x'.repeat(1000)) })
+      queueMicrotask(() => { h.emit({ t: 'q', m: 'log', a: ['x'.repeat(1000)] }) })
     })
-    expect((await h.start()).error?.kind).toBe('output-limit')
+    expect(await h.start()).toMatchObject({ value: 42, outputTruncated: true })
     await setImmediate()
-    expect(h.terminate).toHaveBeenCalledTimes(1)
+    expect(h.terminate).not.toHaveBeenCalled()
   })
 
   it('reports the exit result when the control pipe ends beside process completion', async () => {
@@ -267,7 +358,7 @@ describe('persistent PTC host protocol', () => {
     expect(result.error?.message).toContain('fatal output')
   })
 
-  it('does not send a late binding result into the next evaluation', async () => {
+  it.each(['resolve', 'reject'] as const)('suppresses a late binding %s during the next evaluation', async (outcome) => {
     const h = await setup({ maxMessageBytes: 1024 })
     const release = Promise.withResolvers<string>()
     onTestFinished(() => { release.resolve('') })
@@ -278,7 +369,8 @@ describe('persistent PTC host protocol', () => {
     h.onBoot(() => { booted.resolve(undefined) })
     const next = h.start(slow, NO_INITIAL_FRAME)
     await booted.promise
-    release.resolve('x'.repeat(2000))
+    if (outcome === 'resolve') release.resolve('x'.repeat(2000))
+    else release.reject(new Error('x'.repeat(2000)))
     await setImmediate()
     h.complete({ value: encodePtcJsonWire(2) })
     expect(await next).toMatchObject({ value: 2 })
@@ -331,40 +423,34 @@ describe('persistent PTC host protocol', () => {
       })
       const result = await h.start()
       expect(result.error?.kind).toBe('worker-exit')
-      expect(result.logs).toEqual([])
+      expect(result.output.filter(block => block.type === 'text').map(block => block.text)).toEqual([])
     }
   })
 
   it('reports failed managed cleanup and waits for both exit and pipe drain', async () => {
     const h = await setup()
     h.waitForExit.mockRejectedValue(new Error('cleanup failed'))
-    h.onBoot(() => { h.emit({ t: 'q', m: 'outputLimit', a: [] }) })
+    h.onBoot(() => { h.emit({ t: 'q', m: 'log', a: [42] }) })
     expect((await h.start()).error?.message).toContain('cleanup failed')
   })
 
-  it.each([
-    { maxOutputBytes: 38, kind: 'worker-exit' },
-    { maxOutputBytes: 4, kind: 'output-limit' },
-  ])('bounds cleanup failure after parse diagnostics overflow a $maxOutputBytes-byte budget', async ({ maxOutputBytes, kind }) => {
+  it.each([38, 4])('preserves the exception kind when parse diagnostics exceed %s bytes', async (maxOutputBytes) => {
     const h = await setup({ maxOutputBytes })
     h.onBoot(() => { h.complete({}) })
-    expect(await h.start()).toMatchObject({ logs: [] })
-    h.waitForExit.mockRejectedValue(new Error('x'))
+    await h.start()
     const result = await h.runtime.run(h.runtime.resolve({ ...request, program: 'return 1' }))
-    expect(result.error?.kind).toBe(kind)
-    if (kind === 'worker-exit') expect(result.error?.message).toContain('cleanup failed: x')
-    const bytes = Buffer.byteLength(JSON.stringify(result.logs)) + Buffer.byteLength(JSON.stringify(result.error?.message))
-    expect(bytes).toBeLessThanOrEqual(maxOutputBytes)
-    expect(h.terminate).toHaveBeenCalledTimes(1)
-    expect(h.waitForExit).toHaveBeenCalledTimes(1)
-    await expect(h.runtime.release(request.stateOwner!)).rejects.toThrow('x')
+    expect(result.error?.kind).toBe('exception')
+    expect(result.outputTruncated).toBe(true)
+    expect(Buffer.byteLength(JSON.stringify(result.error?.message)) + 2).toBeLessThanOrEqual(maxOutputBytes)
+    expect(h.terminate).not.toHaveBeenCalled()
+    expect(h.waitForExit).not.toHaveBeenCalled()
   })
 
   it('rejects invalid resolved inputs and deployment bounds', async () => {
     const h = await setup()
     expect(h.runtime.executionInstructions).toContain('Variables, functions, and imported modules remain in memory')
-    await expect(h.runtime.run({ ...request, cwd: '.', timeoutMs: null })).rejects.toThrow('resolved inputs')
-    await expect(h.runtime.run({ ...request, cwd: process.cwd(), timeoutMs: Infinity })).rejects.toThrow('resolved inputs')
+    await expect(h.runtime.run({ ...request, cwd: '.', timeoutMs: null })).rejects.toThrow('resolved sandbox policy')
+    await expect(h.runtime.run({ ...h.runtime.resolve(request), timeoutMs: Infinity })).rejects.toThrow('resolved cwd and timeout')
     for (const config of [
       { timeoutMs: 0 }, { maxMessageBytes: 1.5 }, { maxOutputBytes: 3 }, { graceMs: 2_147_483_648 },
       { launch: { kind: 'node-script', executable: '' } },
@@ -458,9 +544,9 @@ it('logs unexpected idle readiness and its failed cleanup', async () => {
     h.onBoot(() => { h.complete({}) })
     await h.start()
     h.waitForExit.mockRejectedValueOnce(new Error('idle cleanup failed'))
-    h.emit({ t: 'q', m: 'ready', a: [] })
+    h.emit({ t: 'q', m: 'ready', a: [PROGRAM_PROTOCOL_VERSION] })
     await vi.waitFor(() => { expect(reported).toHaveBeenCalledTimes(2) })
-    expect(reported.mock.calls).toEqual([['unexpected persistent PTC readiness'], ['idle cleanup failed']])
+    expect(reported.mock.calls).toEqual([['duplicate program readiness'], ['idle cleanup failed']])
   } finally { reported.mockRestore() }
 })
 
@@ -479,6 +565,19 @@ it('does not log a launch failure after cancellation closed the environment', as
     expect((await result).error?.kind).toBe('abort')
     expect(reported).not.toHaveBeenCalled()
   } finally { reported.mockRestore() }
+})
+
+it('ignores late output-stream errors after owner release', async () => {
+  const h = await setup()
+  const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+  try {
+    h.onBoot(() => { h.complete({}) })
+    await h.start()
+    await h.runtime.release(request.stateOwner!)
+    h.stderr.emit('error', new Error('pipe closed after release'))
+    expect(warn).not.toHaveBeenCalled()
+    expect(h.terminate).toHaveBeenCalledOnce()
+  } finally { warn.mockRestore() }
 })
 
 it('logs an idle process failure with its bounded stderr tail', async () => {
@@ -512,23 +611,6 @@ it('retries process observation before releasing an owner after cleanup fails', 
     expect(reported).not.toHaveBeenCalled()
     expect(h.waitForExit).toHaveBeenCalledTimes(2)
   } finally { reported.mockRestore() }
-})
-
-it('reserves the owner while parse-output overflow releases its environment', async () => {
-  const h = await setup({ maxOutputBytes: 32 })
-  const cleanup = Promise.withResolvers<true>()
-  const stopped = Promise.withResolvers<boolean>()
-  h.onBoot(() => { h.complete({}) })
-  await h.start()
-  h.waitForExit.mockImplementation(async () => { cleanup.resolve(true); return stopped.promise })
-  const pending = h.runtime.run(h.runtime.resolve({ ...request, program: 'return 1' }))
-  try {
-    await cleanup.promise
-    await expect(h.runtime.run(h.runtime.resolve(request))).rejects.toThrow('cleanup is incomplete')
-    expect(h.spawn).toHaveBeenCalledOnce()
-    stopped.resolve(true)
-    expect((await pending).error?.kind).toBe('output-limit')
-  } finally { stopped.resolve(true); await pending }
 })
 
 it.each([true, false])('classifies confined process spawn failure with runner evidence %s', async (runnerFailure) => {
@@ -573,7 +655,7 @@ it('releases a confirmed exited process even when its output pipe did not drain'
   const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
   try {
     await expect(h.runtime.release(request.stateOwner!)).resolves.toBeUndefined()
-    expect(warn).toHaveBeenCalledWith('persistent Node process exited but its output did not drain cleanly')
+    expect(warn).toHaveBeenCalledWith('Node process exited but its output did not drain cleanly')
     await expect(h.runtime.release(request.stateOwner!)).resolves.toBeUndefined()
   } finally { warn.mockRestore() }
 })
@@ -586,6 +668,6 @@ it('preserves logs in a result-level failure when temporary process pipes do not
     h.stdout.destroy()
   })
   const result = await h.start({ program: '1', bindings: [] })
-  expect(result.logs).toEqual(['captured before cleanup'])
+  expect(result.output.filter(block => block.type === 'text').map(block => block.text)).toEqual(['captured before cleanup'])
   expect(result.error).toEqual({ kind: 'worker-exit', message: 'managed process exited but its output did not drain cleanly' })
 })

@@ -24,7 +24,7 @@ import type {
   InboxState,
 } from '@deepseek-ai/dsh-agent'
 import { modelSelectionProjectionDefinition } from '@deepseek-ai/dsh-agent'
-import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { errorChain, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { interruptedTurnClosers, SessionLogOffset, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -170,7 +170,6 @@ interface AgentInitializationOptions {
   readonly stored?: StoredSession | undefined
   readonly setup?: AgentSetup | undefined
   readonly signal?: AbortSignal | undefined
-  readonly parentAgent?: Agent | undefined
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -299,7 +298,7 @@ export class AgentLoop extends Service implements AgentFactory {
       sessionId: z.string().min(1),
       provider: z.string(),
       model: z.string(),
-      reasoningEffort: z.string().min(1) as z<ReturnType<typeof ReasoningEffortId>>,
+      reasoningEffort: z.string().min(1) as z<ReasoningEffortId>,
       maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
       cwd: z.string(),
       resumeSessionId: z.string(),
@@ -459,22 +458,19 @@ export class AgentLoop extends Service implements AgentFactory {
    * Registers factory teardown and caller cancellation before constructing the scope.
    * Failed initialization drains cleanup while retaining stored events and inbox input.
    * @param ownerCtx - caller context that owns the Agent lifecycle.
-   * @param options - acquired Session/write handle, loop options, start source, parent Agent, setup, and cancellation.
+   * @param options - acquired Session/write handle, loop options, start source, setup, and cancellation.
    * @returns the initialized Agent and its shared disposer.
    */
   private async initializeAgent(
     ownerCtx: Context,
     options: AgentInitializationOptions,
   ): Promise<AgentHandle> {
-    const { session, agentOptions, source, stored, setup, signal: callerSignal, parentAgent } = options
+    const { session, agentOptions, source, stored, setup, signal: callerSignal } = options
     const id = session.id
     const loopCtx = this.runtime.ctx
 
-    // Deactivation fuses three owners, each with its own reason: the caller's
-    // cancellation signal, the owner fiber's unload, and factory teardown.
-    // It is registered BEFORE any resource exists, over mutable slots, so an
-    // unload arriving while the scope is still minting finds a working
-    // disposer instead of a leak.
+    // The caller's signal governs creation. Owner disposal and factory
+    // shutdown can end the Agent's lifetime both during and after creation.
     const abort = new AbortController()
     const onCallerAbort = (): void => {
       abort.abort(callerSignal?.reason instanceof Error
@@ -515,7 +511,12 @@ export class AgentLoop extends Service implements AgentFactory {
         if (machine === undefined) await machineReady.promise
         /* v8 ignore next -- setup failure untracks this disposer before resolving without a machine. */
         if (machine !== undefined) {
-          machine.cancel({ kind: 'disposed' }, { keepInbox: !ready })
+          try {
+            machine.cancel({ kind: 'disposed' }, { keepInbox: !ready })
+          } catch (error: unknown) {
+            failures.push(error)
+          }
+          // A failed queue write must not release resources underneath work.
           await machine.whenIdle()
         }
       } catch (error: unknown) {
@@ -553,8 +554,6 @@ export class AgentLoop extends Service implements AgentFactory {
       }
     }
     const untrack = this.ownership.track(dispose)
-    const modelProjectionHandle = this.modelProjectionHandle
-    const inboxProjectionHandle = this.inboxProjectionHandle
     try {
       assertAgentOptions(agentOptions)
       ownerCtx.fiber.assertActive()
@@ -567,12 +566,15 @@ export class AgentLoop extends Service implements AgentFactory {
           : new Error(`agent "${id}" creation aborted`, { cause: callerSignal.reason })
       }
       const lastTurn = loopCtx.agents.turnBoundaryOf(session).lastTurn
+      const projections = {
+        modelSelection: this.modelProjectionHandle.readerFor(session),
+        inbox: this.inboxProjectionHandle.readerFor(session),
+      }
       unfollowOwner = ownerCtx.effect(function* () {
         const created = machine = new ReactLoopAgent(
           loopCtx, id, agentOptions, session,
-          () => modelProjectionHandle.stateOf(session),
-          () => inboxProjectionHandle.stateOf(session),
-          lastTurn,
+          projections,
+          lastTurn, abort.signal,
         )
         machineReady.resolve()
         // Adopt the scope on its original fiber so it cannot unload before teardown.
@@ -632,10 +634,11 @@ export class AgentLoop extends Service implements AgentFactory {
           assertLive()
           // The mounted backend routes announced live events into the active
           // write handle by session id; the loop only owns the handle itself.
-          detachAgent = loopCtx.agents.enter(agent, parentAgent)
+          detachAgent = loopCtx.agents.enter(agent)
           await loopCtx.agents.announce(agent, source, abort.signal)
           assertLive()
           ready = true
+          callerSignal?.removeEventListener('abort', onCallerAbort)
           return { agent, dispose }
         } catch (error: unknown) {
           // Failed initialization must not release queued input into a new turn.
@@ -682,16 +685,22 @@ export class AgentLoop extends Service implements AgentFactory {
    * already written to the handle.
    * @param session - the unpublished session to store.
    * @param signal - optional cancellation forwarded to the backend create.
+   * @param parentSource - fork parent and cut; the constructor log is stored at creation.
    * @returns the owned handle and stored cursor, or `undefined` without a backend.
    */
-  private async createStoredSession(session: Session, signal?: AbortSignal): Promise<StoredSession | undefined> {
+  private async createStoredSession(
+    session: Session, signal?: AbortSignal, parentSource?: CreateAgentOptions['parentSource'],
+  ): Promise<StoredSession | undefined> {
     const persistence = this.runtime.ctx.get('sessionPersistence')
     if (persistence === undefined) return undefined
+    // oxlint-disable-next-line typescript/no-deprecated -- The stored log includes constructor-generated markers.
+    const stored = parentSource === undefined ? undefined : { ...parentSource, events: session.snapshotEvents() }
     const handle = await persistence.create(session.header, {
       inheritedEventCount: session.inheritedEventCount,
+      ...stored === undefined ? {} : { parentSource: stored },
       ...signal === undefined ? {} : { signal },
     })
-    return { handle, storedCount: 0 }
+    return { handle, storedCount: stored?.events.length ?? 0 }
   }
 
   /**
@@ -723,9 +732,9 @@ export class AgentLoop extends Service implements AgentFactory {
       using ownedPreparation = preparation
       // raceAbortCall closes a handle that finishes creating after cancellation.
       const stored = options.signal === undefined
-        ? await this.createStoredSession(ownedPreparation.session)
+        ? await this.createStoredSession(ownedPreparation.session, undefined, options.parentSource)
         : await raceAbortCall(
-          () => this.createStoredSession(ownedPreparation.session, options.signal),
+          () => this.createStoredSession(ownedPreparation.session, options.signal, options.parentSource),
           options.signal,
           options.sessionId,
           (abandoned) => { void abandoned?.handle.close().catch(() => {}) },
@@ -737,7 +746,6 @@ export class AgentLoop extends Service implements AgentFactory {
         setup: options.setup,
         signal: options.signal,
         source: 'startup',
-        parentAgent: options.parentAgent,
       })
     })()
     this.ownership.trackWrapper(published)
@@ -822,7 +830,6 @@ export class AgentLoop extends Service implements AgentFactory {
           setup: options.setup,
           signal: options.signal,
           source: 'resume',
-          parentAgent: options.parentAgent,
         })
       } finally {
         preparation?.[Symbol.dispose]()

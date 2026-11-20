@@ -1,4 +1,4 @@
-/** Body of a `create_personalized_page` card: location choice, creation progress, retention, undo and restore. */
+/** Body of a `create_personalized_page` card: location choice, creation progress, undo and restore. */
 import { useCallback, useId, useState, useSyncExternalStore } from 'react'
 import { z } from 'zod'
 import { Button, IconChevronDownOutlineRegular, IconWarningTriangleOutlineRegular, Menu, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -61,11 +61,12 @@ function LocationPicker({ value, disabled, onChange, t }: {
 }
 
 /**
- * Display creation, persistent installation, reversible removal and restoration below the frame's summary.
+ * Display creation, persistent installation, reversible removal and restoration below the frame's summary; a card whose
+ * fields fail the page schema shows the frame's fallback.
  * @param props - card, state, actions, folded-text component and notice preference.
  * @returns the card body.
  */
-export function PageCardBody({ proposal, decision, summary, Folded, act, infoDismissed, t }: PageCardProps) {
+export function PageCardBody({ proposal, decision, summary, fallback, Folded, act, infoDismissed, t }: PageCardProps) {
   const details = detailsSchema.safeParse(proposal.details)
   const parsed = decision === undefined ? undefined : dataSchema.safeParse(decision.data)
   const data = parsed?.success === true ? parsed.data : undefined
@@ -79,7 +80,7 @@ export function PageCardBody({ proposal, decision, summary, Folded, act, infoDis
   const customId = useId()
   const [pending, setPending] = useState<CardVerb>()
   const [error, setError] = useState<RecommendationKey>()
-  if (!details.success) return <div className={css.body}>{summary}</div>
+  if (!details.success) return fallback
   const busy = pending !== undefined
   const slot = selected !== undefined && selected !== 'custom' ? selected : data?.slot ?? details.data.slot
   const location = selected ?? (data?.customLocation === undefined ? slot : 'custom')
@@ -148,22 +149,12 @@ export function PageCardBody({ proposal, decision, summary, Folded, act, infoDis
             </Button>
           </div>
         </footer>
-      </div> : <p className={css.description}>{t('location')} · {data?.customLocation ?? t(data?.slot ?? details.data.slot)}</p>}
-      {phase === 'creating' && <footer className={css.footer}>
-        <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void run('cancel') }}>{t(pending === 'cancel' ? 'cancelling' : 'cancel')}</Button>
-      </footer>}
-      {installed && <footer className={css.footer}>
-        <span className={css.scope}>{t('scope')}</span>
-        <div className={css.actions}>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void run('undo') }}>{t('undo')}</Button>
-          {phase !== 'kept' && <Button variant="primary" size="sm" disabled={busy} onClick={() => { void run('keep') }}>{t('keep')}</Button>}
-        </div>
-      </footer>}
-      {phase === 'removed' && <footer className={css.footer}>
-        <div className={css.actions}>
-          <Button variant="primary" size="sm" disabled={busy} onClick={() => { void run('restore') }}>{t(pending === 'restore' ? 'restoring' : 'restore')}</Button>
-        </div>
-      </footer>}
+      </div> : <div className={css.placement}>
+        <p className={css.description}>{t('location')} · {data?.customLocation ?? t(data?.slot ?? details.data.slot)}</p>
+        {phase === 'creating' && <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void run('cancel') }}>{t(pending === 'cancel' ? 'cancelling' : 'cancel')}</Button>}
+        {installed && <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void run('undo') }}>{t('undo')}</Button>}
+        {phase === 'removed' && <Button variant="primary" size="sm" disabled={busy} onClick={() => { void run('restore') }}>{t(pending === 'restore' ? 'restoring' : 'restore')}</Button>}
+      </div>}
     </div>
   </>
 }

@@ -11,6 +11,7 @@
 - banner:
   - navigation "Session hierarchy": Review deepseek-ai/deepseek-harness#314
   - text: Standard mode
+  - button "Session panel"
   - button "More actions"
   - button "Open right sidebar"
   - tablist:
@@ -21,7 +22,11 @@
   - text: GitHub event received
   - time: {{clock}}
 - status: Completed
-- button "Completed in {{duration}}" [disabled]
+- button "Completed in {{duration}}" [expanded]
+- button "Injected context" [expanded]
+- button "Context injection runtime-context"
+- button "Context injection skill-catalog"
+- button "Context injection time-context"
 - paragraph: "Review complete: no actionable findings."
 - button "Copy"
 - button "Good response"

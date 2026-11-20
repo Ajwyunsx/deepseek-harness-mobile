@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypeAlias, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .errors import JsonRpcError, SdkProtocolError, TransportClosedError
-from .models import IncomingRequest, InitializeResponse, JsonObject, JsonValue, Notification, UserQuestionAnswer, UserQuestionRequest
+from .models import CommandExecution, IncomingRequest, InitializeResponse, JsonObject, JsonValue, Notification, ResumeSessionOptions, UserQuestionAnswer, UserQuestionRequest
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 NotificationFilter: TypeAlias = Callable[[Notification], bool]
@@ -217,13 +217,37 @@ class HarnessClient:
         )
         return response.messageId
 
-    def resume_session(self, session_id: str) -> None:
-        """Restore a persisted session without sending a prompt; propagate restoration failures."""
+    def resume_session(self, session_id: str, options: ResumeSessionOptions | None = None) -> None:
+        """Restore history; an explicit permission preset replaces saved permissions before execution."""
+        params: JsonObject = {"sessionId": session_id}
+        if options is not None:
+            if not isinstance(options, dict):
+                raise TypeError("resume_session options must be a dict or None")
+            for key in options:
+                if key != "permission_mode":
+                    raise TypeError(f"unknown resume_session option {key!r}; expected 'permission_mode'")
+            if "permission_mode" in options:
+                params["permissionMode"] = options["permission_mode"]
         self.request(
             "session/resume",
-            {"sessionId": session_id},
+            params,
             response_model=_EmptyResponse,
         )
+
+    def _query(
+        self, session_id: str, input: str | list[JsonObject],
+    ) -> str | CommandExecution:
+        """Return a validated prompt receipt or command result for high-level run callers."""
+        blocks = [{"type": "text", "text": input}] if isinstance(input, str) else input
+        result = self._request_raw("session/query", {
+            "sessionId": session_id, "contentBlocks": blocks,
+        })
+        if isinstance(result, dict):
+            if result.get("kind") == "prompt" and isinstance(result.get("messageId"), str) and result["messageId"]:
+                return result["messageId"]
+            if result.get("kind") == "command":
+                return _command_execution(result.get("execution"))
+        raise SdkProtocolError("session/query requires a prompt messageId or command execution result")
 
     def get_working_directory(self, session_id: str) -> str:
         """Read the effective directory, recovering a missing directory to the Session origin."""
@@ -235,7 +259,7 @@ class HarnessClient:
         return response.cwd
 
     def set_working_directory(self, session_id: str, path: str) -> str:
-        """Enter an absolute or Session-relative directory without changing origin or permissions."""
+        """Enter an absolute or Session-relative directory; the origin is unchanged and the write boundary follows."""
         response = self.request(
             "session/working-directory/set",
             {"sessionId": session_id, "path": path},
@@ -675,8 +699,12 @@ class NotificationSubscription:
         self._closed = True
         self._client._unsubscribe_notifications(self._subscription_id)
 
-    def next(self) -> Notification:
-        item = self._notifications.get()
+    def next(self, timeout_seconds: float | None = None) -> Notification:
+        """Read one notification; an optional timeout stops only this local wait."""
+        try:
+            item = self._notifications.get(timeout=timeout_seconds)
+        except queue.Empty as exc:
+            raise TimeoutError("timed out waiting for an SDK notification") from exc
         if isinstance(item, BaseException):
             raise item
         return item
@@ -706,3 +734,11 @@ class _EmptyResponse(BaseModel):
 
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _command_execution(value: JsonValue) -> CommandExecution:
+    """Decode native command results and report malformed data as a protocol error."""
+    try:
+        return CommandExecution.model_validate(value)
+    except ValidationError as error:
+        raise SdkProtocolError("session/query returned an invalid command result") from error

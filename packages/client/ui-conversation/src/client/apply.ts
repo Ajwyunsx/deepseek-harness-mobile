@@ -1,7 +1,9 @@
+import type {} from '@deepseek-ai/dsh-client-ui-context-menu/client'
 /** Registers the target-neutral Conversation assembly, shell, input, and docks. */
 import type {} from '@deepseek-ai/dsh-client-product-analytics/client'
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
+import type { SyncedConfig } from '@deepseek-ai/dsh-client-config/types'
+import type { ConversationConfig } from '../types.ts'
 import type { ISessions, SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import { IconPaperclipOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore, type BoundActions } from '@deepseek-ai/dsh-client-store'
@@ -11,6 +13,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session-status/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ShortcutCommandId, ShortcutFixedCommand } from '@deepseek-ai/dsh-client-shortcuts/client'
 import { UiConversation } from './conversation/assembly.ts'
@@ -19,7 +22,7 @@ import { sessionReferenceRule } from './user-text/session-reference-rule.ts'
 import { collapseWhitespaceRule, trimWhitespaceRule } from './user-text/whitespace-rules.ts'
 import type { ViewTab } from './contract/views.ts'
 import type {
-  ComposerBarInjected, ConversationInjected, ConversationSessionHeaderInjected,
+  ComposerBarInjected, ConversationInjected, ConversationSessionHeaderInjected, ConversationShellInjected,
   ConversationSessionInjected, DraftFileUploads, UserTextInjected,
 } from './contract/slots.ts'
 import type { InputNotice } from './contract/input.ts'
@@ -32,6 +35,7 @@ import type { IConversation } from './service.ts'
 import { ComposerBlockRegistry } from './input/blocks.ts'
 import type { ComposerBlock } from './contract/composer-blocks.ts'
 import { InputHub } from './input/hub.ts'
+import { createComposerFileIntake } from './input/file-intake.ts'
 import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
 import { queueDockEntry } from './queue/QueueDock.tsx'
 import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
@@ -56,21 +60,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Services required by the Conversation plugin. */
+/**
+ * Services required by the Conversation plugin. `uiSession.sessionStatus` provides the `useSessionStatus` hook the
+ * Conversation shell renders with, so the plugin unloads and reloads with it.
+ */
 export const inject = [
-  'slots', 'sessions', 'fileUpload', 'uiSession', 'uiWorkspace', 'locale', 'configForms',
+  'slots', 'sessions', 'fileUpload', 'uiSession', 'uiSession.sessionStatus', 'uiWorkspace', 'locale', 'configForms',
 ]
 
-/** Conversation runtime configuration. */
-export interface Config {
-  /** Maximum generic-file uploads allowed to run concurrently in browser Workers. */
-  maxConcurrentFileUploads?: number
-}
-
-/** Validated Conversation runtime configuration. */
-export const Config: z<Config> = z.object({
-  maxConcurrentFileUploads: z.natural().min(1).default(2),
-})
 
 // Stable no-session sources keep the renderer's observable-hook cache and
 // hook order unchanged across current-Session transitions.
@@ -115,7 +112,7 @@ function hostPathBridge(): HostPathBridge | undefined {
 interface WorkspaceNavigation {
   openSession(sessionId: SessionId): void
   openWorkspace(
-    workspaceId: Parameters<ConversationInjected['selectWorkspace']>[0],
+    workspaceId: Parameters<ConversationShellInjected['openWorkspace']>[0],
     beforeOpen: (sessionId: SessionId) => void,
   ): Promise<void>
 }
@@ -152,12 +149,12 @@ function concreteConversation(ctx: Context): ConversationController {
 /**
  * Mount the Conversation core and target-neutral presentation.
  * @param ctx - Client root context.
+ * @param config - Host-synced live configuration.
  */
-export function apply(ctx: Context, config: Config = Config({})): void {
+export function apply(ctx: Context, config: SyncedConfig<ConversationConfig>): void {
   const sessions = ctx.sessions
   const slots = ctx.slots
-  // Schemastery's field default is materialized before Cordis calls apply.
-  const maxConcurrentFileUploads = config.maxConcurrentFileUploads as number
+  const fileUploadLimit = config.maxConcurrentFileUploads
   const workspaceNavigation = ctx.get('uiWorkspace') as WorkspaceNavigation
   const uiConversation = new UiConversation(ctx, sessions)
   uiConversation.userText.register(sessionReferenceRule)
@@ -332,6 +329,10 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     },
   })
 
+  const shellInjected: ConversationShellInjected = {
+    openWorkspace: (workspaceId, adopt) => workspaceNavigation.openWorkspace(workspaceId, adopt),
+  }
+
   const registerConversationRoot = () => slots.register({
     name: 'main.conversation',
     children: {
@@ -348,6 +349,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       'conversation.composer': { kind: 'chain', scope: 'session' },
       'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
       'conversation.input.dock': { kind: 'list', scope: 'session' },
+      'conversation.hero.frame': { kind: 'hoc', scope: 'root' },
       'conversation.hero.brand.mark': { kind: 'single', scope: 'root' },
       'conversation.hero.workspace': { kind: 'single', scope: 'root' },
       'conversation.hero.agentPreset': { kind: 'single', scope: 'session-maybe' },
@@ -361,9 +363,11 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       hooks: {
         composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId),
       },
-      selectWorkspace: workspaceId => workspaceNavigation.openWorkspace(workspaceId, (nextId) => {
+      moveDraft: (nextId) => {
         if (sessionId !== undefined && nextId !== sessionId) {
           const from = inputHub.shell(sessionId)
+          // A draft with a submission in flight stays with the Session that is admitting it.
+          if (from.snapshot.phase !== 'plain' && from.snapshot.phase !== 'claimed') return
           const draft = from.draftSnapshot
           const attachmentIds = from.snapshot.attachmentIds
           const next = inputHub.shell(nextId)
@@ -384,7 +388,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
             }
           }
         }
-      }),
+      },
     }),
   }, ConversationContent)
 
@@ -456,6 +460,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     }),
   }, ConversationSessionHeader)
 
+  const fileIntake = createComposerFileIntake()
   const registerComposerBar = () => slots.register({
     name: 'conversation.composer.bar',
     locale: NS,
@@ -473,6 +478,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     inject: (sessionId: SessionId | undefined): ComposerBarInjected => {
       if (sessionId === undefined) {
         return {
+          registerFileIntake: fileIntake,
           keyboard: undefined,
           addFiles: undefined,
           removeAttachment: undefined,
@@ -480,6 +486,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
           retryFileUpload: undefined,
           toggleCommandMenu: undefined,
           stop: undefined,
+          retry: undefined,
           hooks: {
             stopShortcut,
             busyEnter: submissionPolicy.busyEnter,
@@ -495,10 +502,12 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       const inputTriggers = inputHub.inputTriggers(sessionId)
       const bridge = hostPathBridge()
       return {
+        registerFileIntake: fileIntake,
         keyboard: shell,
         addFiles: (files, directories = new Set()) => {
           if (sessions.binding(sessionId) === undefined) return t('file.sessionUnavailable')
-          if (shell.snapshot.phase === 'adjudicating' || shell.snapshot.phase === 'submitting') {
+          const { phase } = shell.snapshot
+          if (phase === 'adjudicating' || phase === 'submitting' || phase === 'sending') {
             return t('attachment.dropBlocked')
           }
           const uploads: File[] = []
@@ -558,6 +567,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
             })
           },
         stop: () => { stop(sessionId) },
+        retry: (failureSeq) => { inputHub.retry(sessionId, failureSeq) },
         hooks: {
           stopShortcut,
           busyEnter: submissionPolicy.busyEnter,
@@ -574,7 +584,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     yield slots.register({
       name: 'main',
       key: 'conversation',
-      children: { 'main.conversation': { kind: 'single', scope: 'session-maybe' } },
+      children: { 'main.conversation': { kind: 'single', scope: 'session-maybe', inject: shellInjected } },
     }, ConversationPanel)
     yield registerConversationRoot()
     yield registerConversationContent()
@@ -587,7 +597,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
   ctx.plugin(ConversationController, {
     input: inputHub,
     blocks: composerBlocks,
-    maxConcurrentFileUploads,
+    maxConcurrentFileUploads: fileUploadLimit,
   })
   ctx.plugin(todoDockEntry)
   ctx.plugin(queueDockEntry)

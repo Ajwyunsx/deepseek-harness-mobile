@@ -2,22 +2,20 @@
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { Context } from '@deepseek-ai/cordis'
 import { ACCOUNT_QUOTA_EXCEEDED_CODE, APP_IDENTITY, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-deepseek-account'
+import type { DeepSeekAuthorization } from '@deepseek-ai/dsh-deepseek-auth'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
-  catalogModelInfo, ModelListingCache, refuseListedModel, registerDeepSeekProvider, requestModelListing, resolveAdapterOptions,
-  resolveListedCatalog,
+  catalogModelInfo, createModelListingCache, refuseListedModel, registerDeepSeekProvider, resolveAdapterOptions, resolveListedCatalog,
 } from '@deepseek-ai/dsh-llm-deepseek'
 import type { DeepSeekRequestAuth, ListedCatalog, ListingView, ModelListing, ResolvedDeepSeekOptions } from '@deepseek-ai/dsh-llm-deepseek'
+import { cancelAccountTasks, installAccountTaskCancellation } from './account-tasks.ts'
 import { Config, plainAccountOptions, resolveAccountOptions } from './config.ts'
 
 export { Config } from './config.ts'
 export const name = 'llm-deepseek-account'
-export const inject = ['llm']
+export const inject = ['llm', 'deepseekAuth']
 
 const PROVIDER = 'deepseek-account'
-/** Header carrying the account token on Messages, Files, and model-listing requests. */
-const TOKEN_HEADER = 'x-dsh-auth-token'
 /** Console tag of listing diagnostics; product profiles mount no console exporter for `ctx.logger`. */
 const LOG_TAG = '[llm-deepseek-account]'
 
@@ -30,36 +28,58 @@ export function apply(ctx: Context, config: Config): void {
   const environment = launchEnvironmentOf(ctx)
   const settings = () => resolveAccountOptions(plainAccountOptions(config), environment)
   settings()
+  // Every other DeepSeek consumer billed by the account sends the sign-in to this route's deployment.
+  ctx.effect(() => ctx.deepseekAuth.connect('account', PROVIDER, () => ({ baseURL: settings().protocol.baseURL })), 'llm-deepseek-account: account deployment')
   const supported = resolveAdapterOptions({}).models
-  const account = () => ctx.get('deepseekAccount')
-  const resolveAuth = async (connection: ResolvedDeepSeekOptions): Promise<DeepSeekRequestAuth> => {
-    const token = await account()?.resolveToken(connection.baseURL)
-    if (token === undefined) throw new LlmError('Sign in to DeepSeek to use the account provider. The request destination must allow account authentication.', 'ACCOUNT_SIGN_IN_REQUIRED')
+  /**
+   * The account sign-in `ctx.deepseekAuth` releases for one destination under the deployment at `baseURL`; absent
+   * without an allowed signed-in account or without the account service.
+   */
+  const requestCredential = (baseURL: string, endpoint: string): Promise<DeepSeekAuthorization | undefined> =>
+    ctx.deepseekAuth.authorize({
+      consumer: name, accepts: ['account'], billing: 'account', destination: { url: endpoint }, connections: { account: { baseURL } },
+    })
+  /** The failure of a request whose account signed out before it finished: the code a request made after the sign-out fails with. */
+  const signedOutMidRequest = (cause: unknown) => new LlmError(
+    'The DeepSeek account signed out before this request finished. Sign in to DeepSeek to use the account provider.',
+    'ACCOUNT_SIGN_IN_REQUIRED',
+    { cause },
+  )
+  const resolveAuth = async (connection: ResolvedDeepSeekOptions, endpoint: string): Promise<DeepSeekRequestAuth | undefined> => {
+    const credential = await requestCredential(connection.baseURL, endpoint)
+    if (credential === undefined) return undefined
     return {
-      headers: { [TOKEN_HEADER]: token },
+      ...credential,
       onRequestError: async (error) => {
-        if (!(error instanceof LlmError)) return error
-        if (error.code === QUOTA_EXCEEDED_CODE) {
-          return new LlmError(error.message, ACCOUNT_QUOTA_EXCEEDED_CODE, { ...error.failure, cause: error })
+        try {
+          // A sign-out ends the requests that carry its token, so it is the failure of any request that fails after it.
+          if (credential.revoked?.aborted === true) return signedOutMidRequest(error)
+          if (!(error instanceof LlmError)) return error
+          if (error.code === QUOTA_EXCEEDED_CODE) {
+            return new LlmError(error.message, ACCOUNT_QUOTA_EXCEEDED_CODE, { ...error.failure, cause: error })
+          }
+          if (error.failure.status !== 401) return error
+          const rejected = new LlmError(error.message, 'ACCOUNT_TOKEN_INVALID', { ...error.failure, cause: error })
+          await credential.reject?.()
+          return rejected
+        } finally {
+          // A request can outlive this plugin and the sign-out listener it mounts. Once the credential it carried is
+          // signed out, by the user or by the rejection above, the request ends this route's tasks itself.
+          if (credential.revoked?.aborted === true) cancelAccountTasks(ctx, PROVIDER)
         }
-        if (error.failure.status !== 401) return error
-        const rejected = new LlmError(error.message, 'ACCOUNT_TOKEN_INVALID', { ...error.failure, cause: error })
-        try { await account()?.rejectToken(token) }
-        catch (_credentialRemovalFailed) { /* Storage failure cannot replace the inference failure. */ }
-        return rejected
       },
     }
   }
-  const catalog = new ModelListingCache({
-    credential: async url => account()?.resolveToken(url),
-    load: (url, token, signal) => requestModelListing(url, { [TOKEN_HEADER]: token }, signal),
-    now: () => Date.now(),
-    // ACP reserves stdout for protocol messages, including during successful catalog loads.
-    info: (message) => { console.error(LOG_TAG, message) },
-    warn: (message) => { console.warn(LOG_TAG, message) },
+  const missingCredential = () => new LlmError(
+    'Sign in to DeepSeek to use the account provider. The request destination must allow account authentication.',
+    'ACCOUNT_SIGN_IN_REQUIRED',
+  )
+  const catalog = createModelListingCache(ctx, name, PROVIDER, {
+    settings: () => settings().catalog,
+    credential: async url => (await requestCredential(settings().protocol.baseURL, url))?.headers,
   })
   let loggedListing: ModelListing | undefined
-  /** Resolve the catalog for one view, logging the listing's hidden entries once per listing. */
+  /** Resolve the catalog, reporting each listing's hidden entries and dropped badges once. */
   const connectionOf = (view: ListingView): AccountConnection => {
     const resolved = settings()
     const result = resolveListedCatalog({
@@ -93,11 +113,14 @@ export function apply(ctx: Context, config: Config): void {
     options: () => connectionOf(catalog.current()),
     connect: async signal => connectionOf(await catalog.view(settings().catalog, signal)),
     resolveAuth,
+    missingCredential,
     admit: (connection, model) => { refuseListedModel(model, connection.catalog.refusals.get(model)) },
     discoverModels: async (provider) => {
       const view = await catalog.view(settings().catalog)
-      return view.authenticated ? discovered(view).catalog.offered.map(model => catalogModelInfo(provider, model)) : []
+      if (!view.authenticated) return []
+      const { offered, badges } = discovered(view).catalog
+      return offered.map(model => catalogModelInfo(provider, model, badges.get(model.id)))
     },
   })
-  ctx.effect(() => () => { catalog.dispose() }, 'llm-deepseek-account: model catalog')
+  installAccountTaskCancellation(ctx, PROVIDER)
 }

@@ -25,7 +25,7 @@ The Web client shows an agent's question beside the chat input. Users choose opt
 <a id="use-this-package"></a>
 ## Use this package
 
-When the agent asks a question, the attached card temporarily occupies the composer seat: answer each question, navigate with the pager, or skip it. A first choice marked “Recommended” starts selected, but remains an unsubmitted draft and does not pause a timed countdown. Clicking a single-select choice advances immediately. Enter on a focused option attempts to submit the batch without selecting that option; missing answers return to the first incomplete question. Enter in a text answer continues the flow, while Shift+Enter breaks a line instead (during IME composition Enter only confirms the input candidate without advancing).
+When the agent asks a question, the attached card temporarily occupies the composer seat: answer each question, navigate with the pager, or skip it. When a single-select question’s first choice is marked “Recommended”, it starts selected; in a multi-select question, every marked choice starts selected. These preselections remain unsubmitted drafts and do not pause a timed countdown. Clicking a single-select choice advances immediately. Enter on a focused option attempts to submit the batch without selecting that option; missing answers return to the first incomplete question. Enter in a text answer continues the flow, while Shift+Enter breaks a line instead (during IME composition Enter only confirms the input candidate without advancing).
 
 ### Answering
 
@@ -60,6 +60,8 @@ A browser that reconnects while the tool call is open receives the pending reque
 The settled bubble is fully visible and has no disclosure control. Question and answer text renders as plain text; question detail and unselected options are omitted. Its copy action writes each question with the answer the user gave, without reopening the tool call or submitting another answer.
 
 -----
+
+Question-card icon actions use 24px square targets with the standard compact radius and hover fill. The header chevron and close glyph are optically balanced, and numbered/custom-answer indicators use the neutral module fill. The question card’s trailing header icon box and footer action surface share the content edge. Pager icons use that same content inset on the leading side; larger click targets extend beyond the icon boxes.
 
 <a id="understand-the-implementation"></a>
 ## Understand the implementation

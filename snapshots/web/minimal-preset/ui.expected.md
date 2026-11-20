@@ -1,6 +1,7 @@
 - banner:
   - navigation "Session hierarchy": Use the bash tool to
   - text: Minimal mode
+  - button "Session panel"
   - button "More actions"
   - button "Open right sidebar"
   - tablist:
@@ -12,6 +13,7 @@
 - status: Completed
 - button "Completed in {{duration}}" [expanded]
 - button "Ran commands" [expanded]
+- button "Context injection runtime-context"
 - button "Bash printf 'MINIMAL_BASH_CARD_OK\\n'" [expanded]
 - text: "IN { \"command\": \"printf 'MINIMAL_BASH_CARD_OK\\\\n'\" } OUT MINIMAL_BASH_CARD_OK [Command finished with exit code 0]"
 - button "Inspect"
