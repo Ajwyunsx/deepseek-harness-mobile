@@ -1,6 +1,12 @@
 # harness overlay manifest: package	version	path	sha256
-@deepseek-ai/dsh-fs-local	0.2.1-rc.3	lib/index.js	a09f5d3d5588367f0c6de5f0047337d505404502b7af58807c95ad341dbfb33b
-@deepseek-ai/dsh-fs-local	0.2.1-rc.3	lib/types/fsio.d.ts	d43f71190587bf387978775c3d887fb4d008c0a510192badd0f6b7f8d6e95e71
-@deepseek-ai/dsh-fs-local	0.2.1-rc.3	lib/types/index.d.ts	d4ceee0ecf2345787ff52bff8287ebc32abac49d163b13235b5e0c244547282c
-@deepseek-ai/dsh-fs-local	0.2.1-rc.3	lib/types/win32.d.ts	d64a7a5ff9a043fb33f2b761fa71330ec834d5b6f02bab97cd68a7e0dfc7fcf4
-@deepseek-ai/dsh-fs-local	0.2.1-rc.3	package.json	a4e98d51c440bb7b71afc0cda357e300e2685c2219139c2a19cddf1ba52c5870
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/index.js	95c0ba78b10a217e6ef31e9086ded15e6ed8828f50e2ea8af59f162ac7eca0d4
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/fsio.d.ts	f4e53a4ac40cb3a7cd52e77f5e1386d3363e4449d093d7069d39f70dc52c3c27
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/fsio.d.ts.map	b4cb9e82e9b06cf561f230f41daa6a971ec44e6e71d5f2360c0fd6aba94676c5
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/fsio.js.map	aec7864c1ace7f91ba44895e65a7cfa1c835b2651e798063b6f2385f2932fc92
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/index.d.ts	aff8c071ff5ffb4507ebd9f834bd54bc7c9acb85de50092b4b88a7fa6d5d8117
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/index.d.ts.map	1e5a233a5410a2e81fb102afe37ffef72a177c9e5ea6d658768a3e5980e46c1c
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/index.js.map	ffea56abe1aa51cce3b42c04eb261e5d307f10c506dea8e9e9160a55be001ee7
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/win32.d.ts	d64a7a5ff9a043fb33f2b761fa71330ec834d5b6f02bab97cd68a7e0dfc7fcf4
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/win32.d.ts.map	45883f00e71c7ee6034386d99f1f27e42cfda00ad93eceacab51c127ccc3eba0
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	lib/types/win32.js.map	8c6f96e0887e334481862f9a34c09fafc55a5d81e2e3c23718406fb478811a2f
+@deepseek-ai/dsh-fs-local	0.2.2-rc.5	package.json	c45b73b35c60e7219d215c7898393cb69bd4065a62162e4e3b7f663bd59ae47b

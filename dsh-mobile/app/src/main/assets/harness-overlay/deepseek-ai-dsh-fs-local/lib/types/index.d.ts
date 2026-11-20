@@ -3,10 +3,11 @@
  * share stale guards, and writes through a symlink update its target without replacing the link.
  * @module @deepseek-ai/dsh-fs-local
  */
+import type { PatchHunk } from '@deepseek-ai/dsh-fs-patch';
 import { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import { FileSystem, FsVersion } from '@deepseek-ai/dsh-fs';
-import type { FsDirEntry, FsEditOutcome, FsEditRequest, FsInfo, FsPathInfo, FsTarget, FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs';
+import { FileSystem, type FsVersion } from '@deepseek-ai/dsh-fs';
+import type { FsDeleteOutcome, FsMoveOutcome, FsDirEntry, FsEditOutcome, FsEditRequest, FsInfo, FsPathInfo, FsTarget, FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs';
 import type { FsIoInternals } from './fsio.ts';
 /** Configuration for the local filesystem backend. */
 export interface Config {
@@ -37,8 +38,10 @@ export declare class LocalFileSystem extends FileSystem {
      * ordered (one wins, the rest see the new version and reject as stale). */
     private locks;
     constructor(ctx: Context, config: Config);
-    /** Run `op` with exclusive access to `targetKey` (FIFO per key). */
+    /** Run one mutation under the same lock ordering as multi-target operations. */
     private withLock;
+    /** Acquire distinct keys in lexical order and release inner locks before outer locks. */
+    private withLocks;
     resolve(path: string, opts?: {
         cwd?: string;
         signal?: AbortSignal;
@@ -63,6 +66,16 @@ export declare class LocalFileSystem extends FileSystem {
     editText(target: FsTarget, edit: FsEditRequest, expected?: {
         version: FsVersion;
     }, signal?: AbortSignal): Promise<FsEditOutcome>;
+    patchText(target: FsTarget, hunks: readonly PatchHunk[], expected?: {
+        version: FsVersion;
+    }, signal?: AbortSignal): Promise<FsEditOutcome>;
+    deleteFile(target: FsTarget, expected?: {
+        version: FsVersion;
+    }, signal?: AbortSignal): Promise<FsDeleteOutcome>;
+    moveFile(source: FsTarget, destination: FsTarget, options: Parameters<FileSystem['moveFile']>[2], signal?: AbortSignal): Promise<FsMoveOutcome>;
+    private writeTarget;
+    private requireFile;
+    private patchContent;
     private versionAfterWrite;
 }
 export default LocalFileSystem;

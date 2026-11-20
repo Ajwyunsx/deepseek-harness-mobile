@@ -11,7 +11,7 @@
  * animation timing are observed rather than assumed.
  *
  * Scenarios:
- *   composer-overlap  the bottom spacer must keep compensating the fixed
+ *   composer-overlap  the bottom scrollport margin must keep compensating the fixed
  *                     composer after React rebuilds the scroll container
  *                     (issue #14)
  *   composer-cold-start
@@ -68,8 +68,8 @@ const DEVICE_SCALE = 2.75
  * .../skeleton/ConversationContent.tsx): the composer seat is a CHILD of
  * `[data-conversation-scroll]`, after the session views, and dsh makes it
  * `position: sticky; bottom: 0` there. The injector then pins it with
- * `position: fixed` and appends its spacer as the scroll body's LAST child, so
- * the seat is not the last element — nesting the seat as a sibling instead (as
+ * `position: fixed` and applies a dynamic margin to the scroll body. Nesting
+ * the seat as a sibling instead (as
  * this page used to) hides that ordering, and the `closest()` scopes the
  * injector uses for the stats bar and the seat resolve differently.
  */
@@ -155,14 +155,13 @@ async function overlapPx(page) {
     const scroller = document.getElementById('scroller')
     const seat = document.querySelector('[data-composer-seat]')
       || document.querySelector('div[class*="_composerSeat"]')
-    const spacer = document.getElementById('dsh-mobile-composer-spacer')
     const rows = scroller.querySelectorAll(':scope > .msg')
     const content = rows.length === 0 ? null : rows[rows.length - 1]
     if (!seat || !content) return { error: 'missing element' }
     scroller.scrollTop = scroller.scrollHeight
     return {
       overlap: Math.round(content.getBoundingClientRect().bottom - seat.getBoundingClientRect().top),
-      spacerHeight: spacer ? Math.round(spacer.getBoundingClientRect().height) : 0,
+      clearance: Math.round(parseFloat(getComputedStyle(scroller).marginBottom)),
       seatHeight: Math.round(seat.getBoundingClientRect().height),
     }
   })
@@ -174,7 +173,7 @@ async function overlapPx(page) {
  * `overlapPx` scrolls to the bottom first, so it only proves "the bottom is
  * reachable" — it cannot see the case that matters on a fresh load: the
  * transcript is already anchored at the bottom (that is where dsh opens a
- * session), the injector then inserts its compensating spacer, and whether the
+ * session), the injector then applies its compensating scrollport margin, and whether the
  * viewport actually follows. Measuring at the natural position is what the user
  * sees, and it is what issue #16 is about.
  */
@@ -183,14 +182,13 @@ async function restingOverlapPx(page) {
     const scroller = document.getElementById('scroller')
     const seat = document.querySelector('[data-composer-seat]')
       || document.querySelector('div[class*="_composerSeat"]')
-    const spacer = document.getElementById('dsh-mobile-composer-spacer')
     const rows = scroller.querySelectorAll(':scope > .msg')
     const last = rows.length === 0 ? null : rows[rows.length - 1]
     if (!seat || !last) return { error: 'missing element' }
     const atBottom = Math.abs(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 2
     return {
       overlap: Math.round(last.getBoundingClientRect().bottom - seat.getBoundingClientRect().top),
-      spacerHeight: spacer ? Math.round(spacer.getBoundingClientRect().height) : 0,
+      clearance: Math.round(parseFloat(getComputedStyle(scroller).marginBottom)),
       atBottom,
       scrollTop: Math.round(scroller.scrollTop),
     }
@@ -221,12 +219,12 @@ async function scenarioComposerOverlap(page) {
   await fillMessages(page, 12)
   await page.waitForTimeout(FIT_TICK_MS)
   const first = await overlapPx(page)
-  check(first.spacerHeight > 0, `spacer carries height (${first.spacerHeight}px)`)
+  check(first.clearance > 0, `scrollport margin carries height (${first.clearance}px)`)
   check(first.overlap <= 0, `last message clears the composer (overlap ${first.overlap}px)`)
 
   // React may replace the scroll container's children wholesale — the seat and its
-  // composer card are rebuilt with them, so the injector has to re-apply the
-  // spacer height against the fresh element rather than the detached one.
+  // composer card are rebuilt with them, so the dynamic rule must keep applying
+  // to the rebuilt scroll container.
   await page.evaluate(() => {
     const scroller = document.getElementById('scroller')
     for (const old of scroller.querySelectorAll(':scope > .msg, :scope > [data-composer-seat]')) old.remove()
@@ -244,7 +242,7 @@ async function scenarioComposerOverlap(page) {
   })
   await page.waitForTimeout(FIT_TICK_MS)
   const second = await overlapPx(page)
-  check(second.spacerHeight > 0, `spacer regained height after the rebuild (${second.spacerHeight}px)`)
+  check(second.clearance > 0, `scrollport margin regained height after the rebuild (${second.clearance}px)`)
   check(second.overlap <= 0, `last message still clears the composer (overlap ${second.overlap}px)`)
 }
 
@@ -254,14 +252,13 @@ async function scenarioComposerOverlap(page) {
  * The app mints a session cookie and then loads the page; the conversation root
  * mounts `visibility: hidden` while its phase settles (`data-phase='settling'`),
  * and the real dsh only reveals it after replaying the session. The injector
- * measures the seat once, sees a 0x0 element, and writes that as the spacer
- * height — which sticks as the "last measured" value, so the transcript keeps
- * running underneath the composer even after the seat becomes visible. The
+ * measures the seat once while it is 0x0; that early measurement must not stick
+ * after the seat becomes visible, or the transcript keeps running underneath it. The
  * first launch after install looks fine because the transcript is still short;
  * the offset only shows up once a rebuilt session has real content.
  *
  * This scenario stages that arrival: an empty, hidden, zero-height seat, then the
- * settled visible seat. The spacer must carry a real height by the end.
+ * settled visible seat. The scrollport margin must carry a real height by the end.
  */
 async function scenarioColdStartHiddenSeat(page) {
   console.log('\nscenario: cold start lands on a hidden composer seat')
@@ -269,8 +266,6 @@ async function scenarioColdStartHiddenSeat(page) {
     const scroller = document.getElementById('scroller')
     for (const old of scroller.querySelectorAll(':scope > .msg')) old.remove()
     scroller.style.removeProperty('scroll-padding-bottom')
-    const spacer = document.getElementById('dsh-mobile-composer-spacer')
-    if (spacer) spacer.remove()
     const seat = document.querySelector('[data-composer-seat]')
       || document.querySelector('div[class*="_composerSeat"]')
     // Settling phase: mounted but invisible, and not laid out yet.
@@ -295,8 +290,8 @@ async function scenarioColdStartHiddenSeat(page) {
   await page.waitForTimeout(FIT_TICK_MS)
 
   const result = await restingOverlapPx(page)
-  check(result.spacerHeight > 0,
-    `spacer recovers a height after the seat becomes visible (${result.spacerHeight}px)`)
+  check(result.clearance > 0,
+    `scrollport margin recovers a height after the seat becomes visible (${result.clearance}px)`)
   check(result.atBottom === true,
     `the transcript stays anchored at the bottom (atBottom=${result.atBottom}, scrollTop=${result.scrollTop})`)
   check(result.overlap <= 0,
@@ -313,7 +308,7 @@ async function scenarioColdStartHiddenSeat(page) {
  * the bottom, and usually without any transcript mutation, so the injector's
  * mutation observer never re-measures on its own.
  *
- * Growing the spacer moves `scrollHeight` while `scrollTop` stays put, so a
+ * Growing the scrollport margin reduces `clientHeight` while `scrollTop` stays put, so a
  * reader resting at the bottom ends up exactly one growth taller than the floor
  * and the transcript slides under the fixed seat. Only that resting reader may be
  * carried to the new floor; a reader scrolled up must keep their position.
@@ -338,8 +333,8 @@ async function scenarioSeatGrowsWhileResting(page) {
   await page.waitForTimeout(FIT_TICK_MS)
 
   const after = await restingOverlapPx(page)
-  check(after.spacerHeight >= before.spacerHeight,
-    `spacer follows the taller seat (${before.spacerHeight} → ${after.spacerHeight}px)`)
+  check(after.clearance >= before.clearance,
+    `scrollport margin follows the taller seat (${before.clearance} → ${after.clearance}px)`)
   check(after.atBottom === true,
     `the resting reader is carried to the new floor (atBottom=${after.atBottom}, scrollTop=${after.scrollTop})`)
   check(after.overlap <= 0,
@@ -371,7 +366,7 @@ async function scenarioSeatGrowsWhileResting(page) {
  * publishes stable `data-composer-seat` / `data-conversation-scroll` attributes,
  * and the injector must key off those first — otherwise the compensation silently
  * zeroes out and the transcript sits under the fixed composer (the #14/#16
- * symptom). This renames every fragment and asserts the spacer still lands.
+ * symptom). This renames every fragment and asserts the scrollport margin still lands.
  */
 async function scenarioStableAttributeHooks(page) {
   console.log('\nscenario: compensation survives renamed class fragments')
@@ -388,18 +383,34 @@ async function scenarioStableAttributeHooks(page) {
     })
     const scroller = document.getElementById('scroller')
     for (const old of scroller.querySelectorAll(':scope > .msg')) old.remove()
-    const spacer = document.getElementById('dsh-mobile-composer-spacer')
-    if (spacer) spacer.remove()
   })
   await fillMessages(page, 12)
   await page.waitForTimeout(FIT_TICK_MS)
   const result = await overlapPx(page)
   const position = await page.locator('[data-composer-seat]').evaluate(el => getComputedStyle(el).position)
   check(position === 'fixed', `data attribute keeps the composer fixed after class renames (${position})`)
-  check(result.spacerHeight > 0,
-    `spacer still lands via the data attributes (${result.spacerHeight}px)`)
+  check(result.clearance > 0,
+    `scrollport margin still lands via the data attributes (${result.clearance}px)`)
   check(result.overlap <= 0,
     `transcript still clears the composer (overlap ${result.overlap}px)`)
+}
+
+async function scenarioLandscapeReset(page) {
+  console.log('\nscenario: landscape restores the native composer layout')
+  await page.setViewportSize({ width: 800, height: 393 })
+  await page.waitForTimeout(200)
+  const desktop = await page.evaluate(() => {
+    const scroller = document.getElementById('scroller')
+    const seat = document.querySelector('[data-composer-seat]')
+    return {
+      margin: parseFloat(getComputedStyle(scroller).marginBottom),
+      position: getComputedStyle(seat).position,
+    }
+  })
+  check(desktop.margin === 0, `landscape removes the mobile scrollport margin (${desktop.margin}px)`)
+  check(desktop.position === 'sticky', `landscape restores the native sticky seat (${desktop.position})`)
+  await page.setViewportSize(VIEWPORT)
+  await page.waitForTimeout(FIT_TICK_MS)
 }
 
 /**
@@ -508,6 +519,7 @@ async function main() {
     await scenarioColdStartHiddenSeat(page)
     await scenarioSeatGrowsWhileResting(page)
     await scenarioStableAttributeHooks(page)
+    await scenarioLandscapeReset(page)
     await scenarioDrawerExit(page, 'fixed')
     await scenarioDrawerExit(page, 'second-run')
     check(errors.length === 0, `inject.js raised no page errors${errors.length ? `: ${errors[0]}` : ''}`)

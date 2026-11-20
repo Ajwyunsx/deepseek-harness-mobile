@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-fs-local/fsio
  */
 import type { BigIntStats } from 'node:fs';
-import { FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs';
+import { type FsTargetKey, type FsVersion } from '@deepseek-ai/dsh-fs';
 /**
  * Test hook: lets specs pin the atomic-write temp names (to prove exclusive-open behavior without
  * a name race), override native boundaries, and observe the staged temp file before publication.
@@ -27,6 +27,10 @@ export interface FsIoInternals {
     inspectPublicationTarget?: (path: string) => Promise<BigIntStats>;
     /** Override the rename that publishes over this write's own exclusive-create reservation. */
     publishOverReservation?: (existingPath: string, newPath: string) => Promise<void>;
+    /** Observe the final cancellable checkpoint before delete or move commits. */
+    inspectBeforeMutation?: (target: LocalTarget) => void | Promise<void>;
+    /** Override non-recursive source removal for delete and move failures. */
+    removeFile?: (path: string) => Promise<void>;
     /** Override staging-directory removal for commit-point failure coverage. */
     removeStagingDir?: (stagingDir: string) => Promise<void>;
     /** Test hook after the temp file is written/synced but before final chmod+publication. */
@@ -159,20 +163,33 @@ export declare function streamWholeText(target: LocalTarget, signal?: AbortSigna
  * POSIX protects the staging directory and file with `0o700` and `0o600`. A new Windows file
  * inherits the destination directory's DACL; a replacement copies the existing target's DACL
  * onto the empty temp before writing and preserves the target descriptor at publication.
+ * Node write errors become FsError; permission refusals use FS_PERMISSION_DENIED and other I/O uses FS_IO_ERROR.
  * @param absolutePath - destination; missing parent directories are created.
  * @param content - the full UTF-8 text to write.
- * @param mode - existing destination's POSIX mode to preserve, or `undefined` for a new file;
- * inert as a mode on Windows but identifies replacement security semantics.
+ * @param mode - POSIX mode to apply, or undefined to retain the new-file default.
  * @param signal - cancellation checked before final publication.
  * @param internals - Test hook for pinning temp names and observing the staged file.
- * @param createIfAbsent - when provided, publish a no-replace creation; the hard link is the
- * primary primitive, a filesystem that refuses one falls back to an exclusive create replaced
- * by the staged file, and either path must land a regular file. A concurrent creator's file is
- * preserved and this write is rejected with `FS_NOT_OBSERVED` using the supplied display path.
+ * @param options - `displayPath` names the target in diagnostics (defaults to `absolutePath`);
+ * `createIfAbsent` publishes a no-replace creation: a filesystem that refuses the hard-link
+ * primitive falls back to an exclusive create replaced by the staged file, and either path must
+ * land a regular file. A concurrent creator's file is preserved and this write is rejected with
+ * `FS_NOT_OBSERVED`; `existingDestination` states whether Windows must preserve destination
+ * security and defaults to mode presence, while moves pass destination presence separately from
+ * the source mode.
  */
-export declare function writeFileAtomic(absolutePath: string, content: string, mode: number | undefined, signal: AbortSignal | undefined, internals?: FsIoInternals, createIfAbsent?: {
-    displayPath: string;
+export declare function writeFileAtomic(absolutePath: string, content: string, mode: number | undefined, signal: AbortSignal | undefined, internals?: FsIoInternals, options?: {
+    displayPath?: string;
+    createIfAbsent?: boolean;
+    existingDestination?: boolean;
 }): Promise<void>;
+/**
+ * Remove one resolved file without recursive traversal.
+ * @param absolutePath - resolved file identity; a concurrently substituted directory is refused.
+ * @param displayPath - caller-facing source path for diagnostics.
+ * @param internals - optional source-removal fault injection; omission uses non-recursive rm.
+ * @returns once removal completes; permission and other failures use filesystem error codes.
+ */
+export declare function removeFile(absolutePath: string, displayPath: string, internals?: FsIoInternals): Promise<void>;
 /** Line ending style detected before LF normalization. */
 export type LineEndings = 'LF' | 'CRLF';
 /**

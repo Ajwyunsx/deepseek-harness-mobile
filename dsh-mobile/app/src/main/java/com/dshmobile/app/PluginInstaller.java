@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  * （dsh 转发给 profile 目录下的 pnpm，再把声明了 dsh.bundle 的包
  *  reconciled 进 profile 的 bundles 层列表）。
  * pnpm 不随容器预装：首次安装前用 corepack enable 生成 shim
- * （corepack 随 Node 22 自带；首次跑 pnpm 会联网下载 pnpm 本体）。
+ * （corepack 随 Node 24 自带；首次跑 pnpm 会联网下载 pnpm 本体）。
  */
 public final class PluginInstaller {
 

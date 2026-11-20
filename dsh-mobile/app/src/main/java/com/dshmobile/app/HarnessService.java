@@ -260,13 +260,14 @@ public class HarnessService extends Service {
      * <p>容器内的 {@code @deepseek-ai/dsh} 来自 npm，用户重装或升级它之后覆盖就失效
      * 了；这里在每次启动前检查内容哈希，不一致才重新覆盖（一致时零写入）。
      *
-     * <p>已有容器里装的可能是旧版 dsh，而补丁包只对目标版本做过校验——那就先把版本
-     * 对齐（联网 npm 装包，只在本服务进程里尝试一次），再走哈希覆盖。
+     * <p>dsh 0.2.2 要求 Node 24.9+，已有容器先升级 Node，再对齐 dsh（联网 npm
+     * 装包，只在本服务进程里尝试一次），最后走哈希覆盖。
      *
      * @param logFile 追加写覆盖摘要的服务日志
      */
     private void ensureHarnessOverlay(File logFile) {
         try {
+            if (!BootstrapInstaller.ensureNode24(this, logFile)) return;
             File overlayDir = HarnessOverlayAssets.extract(this, new File(getCacheDir(), "harness-overlay"));
             File rootfs = ProotRunner.rootfsDir(this);
             String targetVersion = HarnessOverlay.targetVersion(overlayDir);

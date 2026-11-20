@@ -56,6 +56,9 @@ final class HarnessOverlayAssets {
             }
             return true;
         }
+        if (!target.isDirectory() && !target.mkdirs()) {
+            throw new IOException("无法创建覆盖层子目录: " + target);
+        }
         boolean copied = false;
         for (String child : children) {
             File childTarget = new File(target, child);

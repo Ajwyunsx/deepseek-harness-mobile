@@ -11,6 +11,8 @@
  *   node dsh-mobile/tools/verify-harness-overlay.mjs
  *
  * Scenarios:
+ *   assets           nested APK assets extract and survive a repeated extraction
+ *   node             the runtime check enforces the harness Node >=24.9 requirement
  *   hoisted          npm hoisted the patched package to the tree root
  *   nested           the CLI nests it, and a stale hoisted copy carries another
  *                    version that must stay untouched
@@ -29,7 +31,13 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const overlayDir = join(repoRoot, 'dsh-mobile', 'app', 'src', 'main', 'assets', 'harness-overlay')
 const overlaySource = join(repoRoot, 'dsh-mobile', 'app', 'src', 'main', 'java', 'com', 'dshmobile', 'app', 'HarnessOverlay.java')
+const assetsSource = join(repoRoot, 'dsh-mobile', 'app', 'src', 'main', 'java', 'com', 'dshmobile', 'app', 'HarnessOverlayAssets.java')
 const runnerSource = join(repoRoot, 'dsh-mobile', 'tools', 'overlay-check', 'OverlayCheck.java')
+const assetsRunnerSource = join(repoRoot, 'dsh-mobile', 'tools', 'overlay-check', 'OverlayAssetsCheck.java')
+const contextStubSource = join(repoRoot, 'dsh-mobile', 'tools', 'overlay-check', 'android', 'content', 'Context.java')
+const assetManagerStubSource = join(repoRoot, 'dsh-mobile', 'tools', 'overlay-check', 'android', 'content', 'res', 'AssetManager.java')
+const nodeRuntimeSource = join(repoRoot, 'dsh-mobile', 'app', 'src', 'main', 'java', 'com', 'dshmobile', 'app', 'NodeRuntime.java')
+const nodeRuntimeRunnerSource = join(repoRoot, 'dsh-mobile', 'tools', 'overlay-check', 'NodeRuntimeCheck.java')
 
 /** Run a command to completion; Windows resolves .cmd names through the shell. */
 function run(command, args, options = {}) {
@@ -104,8 +112,16 @@ async function main() {
   const classesDir = join(scratch, 'classes')
   try {
     await mkdir(classesDir, { recursive: true })
-    run('javac', ['-encoding', 'UTF-8', '-d', classesDir, runnerSource, overlaySource])
-    console.log(`compiled HarnessOverlay + OverlayCheck → ${classesDir}`)
+    run('javac', ['-encoding', 'UTF-8', '-d', classesDir, runnerSource, overlaySource,
+      assetsRunnerSource, assetsSource, contextStubSource, assetManagerStubSource,
+      nodeRuntimeRunnerSource, nodeRuntimeSource])
+    console.log(`compiled HarnessOverlay + HarnessOverlayAssets + checks → ${classesDir}`)
+
+    console.log('\nscenario: nested Android asset extraction')
+    const assetsOut = run('java', ['-cp', classesDir, 'com.dshmobile.app.OverlayAssetsCheck', overlayDir, join(scratch, 'extracted-overlay')], { encoding: 'utf8' })
+    check(assetsOut.includes('OVERLAY_ASSETS_EXTRACT=true'), '嵌套资产目录可展开，重复展开仍逐字节一致')
+    const nodeOut = run('java', ['-cp', classesDir, 'com.dshmobile.app.NodeRuntimeCheck', join(scratch, 'node-runtime')], { encoding: 'utf8' })
+    check(nodeOut.includes('NODE_RUNTIME_CHECK=true'), 'Node 版本检查拒绝 22/24.8，接受 24.9 及更新主版本')
 
     console.log('\nscenario: hoisted package')
     const hoistedRootfs = join(scratch, 'hoisted-rootfs')

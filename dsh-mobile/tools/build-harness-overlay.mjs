@@ -22,6 +22,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { x } from 'tar'
 
 /** Harness packages this fork patches; each must be a workspace package. */
 const OVERLAY_PACKAGES = ['@deepseek-ai/dsh-fs-local']
@@ -135,7 +136,7 @@ async function packOne(packageName, scratch) {
   if (archives.length !== 1) {
     throw new Error(`${packageName}: expected one packed tarball, found ${archives.join(', ') || 'none'}`)
   }
-  run('tar', ['-xzf', join(packDir, archives[0]), '-C', packDir], { stdio: 'inherit' })
+  await x({ file: join(packDir, archives[0]), cwd: packDir })
 
   const extracted = join(packDir, 'package')
   const manifest = JSON.parse(await readFile(join(extracted, 'package.json'), 'utf8'))

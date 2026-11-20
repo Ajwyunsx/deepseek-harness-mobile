@@ -462,17 +462,12 @@ div[class*="_trigger"] {
     background: transparent !important;
     box-shadow: none !important;
   }
-  /* 消息流底部留白：不再写在滚动容器（_scrollBody）自己身上——滚动容器的
-     padding-bottom 会把 sticky 输入座的锚点同步上顶（padding 多大座就浮多
-     高），与"补偿重叠"的目的互相打架。留白改由 inject.js 往 scrollBody 末尾
-     追加的间隔块（#dsh-mobile-composer-spacer）承担，这里的 48px 只是
-     scroll-padding（scrollIntoView 用）的 JS 生效前兜底 */
+  /* 消息流底部补偿由 inject.js 的独立 style 按输入座高度设置
+     margin-bottom：缩短滚动区的可见盒子，最后一条消息不会画到固定座下面。
+     这里的 16px 是 JS 生效前的 scrollIntoView 兜底。 */
+  [data-conversation-scroll],
   div[class*="_centerCol"] [class*="_scrollBody"] {
-    scroll-padding-bottom: 48px;
-  }
-  /* scrollBody 是 flex 列，间隔块必须禁收缩，否则内容超高时被压成 0 */
-  #dsh-mobile-composer-spacer {
-    flex: 0 0 auto;
+    scroll-padding-bottom: 16px;
   }
   /* composer 汇总统计条（"N turns · N steps | LLM …"）在部分 dsh 版本里
      不在 _composerSeat 内部，而是座下方文档流里的独立节点——座改 fixed 后

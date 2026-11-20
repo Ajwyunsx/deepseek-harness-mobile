@@ -1,10 +1,12 @@
+import { applyHunks } from "@deepseek-ai/dsh-fs-patch";
 import { constants } from "node:buffer";
 import { once } from "node:events";
 import { watch } from "chokidar";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { pathToFileURL } from "node:url";
 import z from "@deepseek-ai/schemastery";
-import { FileSystem, FsError, FsTargetKey, FsVersion } from "@deepseek-ai/dsh-fs";
+import { FileSystem, FsError, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";
+import { brandString } from "@deepseek-ai/dsh-brand";
 import { randomUUID } from "node:crypto";
 import { createReadStream, realpath } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
@@ -133,18 +135,17 @@ function throwIfAborted(signal, verb) {
 * `readFile` with a bare `AbortError`, which would otherwise escape the seam's
 * error taxonomy — the streaming/write paths translate it the same way).
 */
-async function readFileAbortable(absolutePath, verb, signal) {
+async function readFileAbortable(absolutePath, displayPath, verb, signal) {
 	try {
 		return await readFile(absolutePath, signal ? { signal } : {});
 	} catch (error) {
-		/* v8 ignore next 2 -- a non-abort readFile rejection needs a permission/IO fault racing an open file. */
-		if (!isAbortError(error)) throw error;
-		throw new FsError(`${verb} aborted`, "FS_ABORTED");
+		if (isAbortError(error)) throw new FsError(`${verb} aborted`, "FS_ABORTED");
+		throw fsErrorFromErrno(verb, displayPath, error);
 	}
 }
 /** Opaque version token from high-resolution identity and freshness metadata. */
 function versionOf(info) {
-	return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
+	return brandString(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
 }
 /**
 * Replace a leading `~` with the host user's home directory in a caller-supplied path.
@@ -185,13 +186,12 @@ async function resolveLocalTarget(cwd, path) {
 	try {
 		return {
 			displayPath,
-			targetKey: FsTargetKey(await realpath$1(displayPath))
+			targetKey: brandString(await realpath$1(displayPath))
 		};
 	} catch (error) {
 		/* v8 ignore next -- Windows reports this case as ENOENT and repairs it in the ancestor walk below. */
 		if (isENOTDIR(error)) throw new FsError(`cannot resolve "${displayPath}": a parent path segment is not a directory`, "FS_NOT_FOUND");
-		/* v8 ignore next -- non-ENOENT realpath failure needs a permission/IO fault; ENOENT falls through to ancestor resolution. */
-		if (!isENOENT(error)) throw error;
+		if (!isENOENT(error)) throw fsErrorFromErrno("resolve", displayPath, error);
 	}
 	const missing = [basename(displayPath)];
 	let ancestor = dirname(displayPath);
@@ -206,18 +206,18 @@ async function resolveLocalTarget(cwd, path) {
 		/* v8 ignore stop */
 		return {
 			displayPath,
-			targetKey: FsTargetKey(join(realAncestor, ...missing))
+			targetKey: brandString(join(realAncestor, ...missing))
 		};
 	} catch (error) {
 		/* v8 ignore next -- native Windows coverage exercises the FsError raised by the repair above. */
 		if (error instanceof FsError) throw error;
-		/* v8 ignore next -- a non-ENOENT realpath failure needs a permission/IO fault. */
-		if (!isENOENT(error)) throw error;
+		/* v8 ignore next -- needs an ancestor realpath fault after the full path reported ENOENT. */
+		if (!isENOENT(error)) throw fsErrorFromErrno("resolve", displayPath, error);
 		const parent = dirname(ancestor);
 		/* v8 ignore next -- the filesystem root always realpaths, so the walk terminates before parent === ancestor. */
 		if (parent === ancestor) return {
 			displayPath,
-			targetKey: FsTargetKey(displayPath)
+			targetKey: brandString(displayPath)
 		};
 		missing.unshift(basename(ancestor));
 		ancestor = parent;
@@ -238,8 +238,7 @@ async function probeStats(absolutePath, readStats) {
 	try {
 		return await readStats(absolutePath);
 	} catch (error) {
-		/* v8 ignore next -- a non-ENOENT/ENOTDIR metadata failure needs a permission/IO fault; surface it. */
-		if (!isENOENT(error) && !isENOTDIR(error)) throw error;
+		if (!isENOENT(error) && !isENOTDIR(error)) throw fsErrorFromErrno("stat", absolutePath, error);
 		return null;
 	}
 }
@@ -273,15 +272,6 @@ async function probeNoFollow(absolutePath) {
 		size: Number(info.size)
 	};
 }
-function listingIoError(displayPath, error) {
-	/* v8 ignore next -- defensive pass-through for races where a child resolver has already produced a structured FsError. */
-	if (error instanceof FsError) return error;
-	/* v8 ignore next -- requires the listed target/parent to disappear between successful preflight and listing/child resolution. */
-	if (isENOENT(error) || isENOTDIR(error)) return new FsError(`cannot list "${displayPath}": not found`, "FS_NOT_FOUND", { cause: error });
-	/* v8 ignore next -- Windows chmod does not deny directory listing; POSIX covers permission translation. */
-	if (isPermissionError(error)) return new FsError(`cannot list "${displayPath}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });
-	return new FsError(`cannot list "${displayPath}": ${errorMessage(error)}`, "FS_IO_ERROR", { cause: error });
-}
 async function resolveListedChildTarget(parent, name) {
 	const identity = await resolveLocalTarget(parent.targetKey, name);
 	return {
@@ -303,7 +293,7 @@ async function listDirectory(target, signal) {
 	try {
 		info = await probe(target.targetKey);
 	} catch (error) {
-		throw listingIoError(target.displayPath, error);
+		throw fsErrorFromErrno("list", target.displayPath, error);
 	}
 	if (!info) throw new FsError(`cannot list "${target.displayPath}": not found`, "FS_NOT_FOUND");
 	if (info.type !== "directory") throw new FsError(`cannot list "${target.displayPath}": not a directory`, "FS_NOT_DIRECTORY");
@@ -315,7 +305,7 @@ async function listDirectory(target, signal) {
 		});
 	} catch (error) {
 		/* v8 ignore next -- requires permission/kernel failure from readdir after a successful directory stat. */
-		throw listingIoError(target.displayPath, error);
+		throw fsErrorFromErrno("list", target.displayPath, error);
 	}
 	throwIfAborted(signal, "list");
 	const result = [];
@@ -332,7 +322,7 @@ async function listDirectory(target, signal) {
 				...childInfo?.type === "file" ? { size: childInfo.size } : {}
 			});
 		} catch (error) {
-			throw listingIoError(localDisplayPath(target.displayPath, entry.name), error);
+			throw fsErrorFromErrno("list", localDisplayPath(target.displayPath, entry.name), error);
 		}
 		throwIfAborted(signal, "list");
 	}
@@ -365,9 +355,7 @@ async function statRegularFile(target, verb, signal) {
 	try {
 		info = await stat(target.targetKey);
 	} catch (error) {
-		/* v8 ignore next 2 -- a non-ENOENT stat failure needs a permission/IO fault; only the not-found path is reachable in tests. */
-		if (!isENOENT(error)) throw error;
-		throw new FsError(`cannot ${verb} "${target.displayPath}": not found`, "FS_NOT_FOUND");
+		throw fsErrorFromErrno(verb, target.displayPath, error);
 	}
 	if (!info.isFile()) throw new FsError(`cannot ${verb} "${target.displayPath}": not a regular file`, "FS_NOT_REGULAR_FILE");
 	return info;
@@ -381,7 +369,7 @@ async function statRegularFile(target, verb, signal) {
 */
 async function readWholeText(target, signal) {
 	await statRegularFile(target, "read", signal);
-	const raw = await readFileAbortable(target.targetKey, "read", signal);
+	const raw = await readFileAbortable(target.targetKey, target.displayPath, "read", signal);
 	throwIfAborted(signal, "read");
 	if (raw.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) throw new FsError(`cannot read "${target.displayPath}": binary file`, "FS_NOT_TEXT");
 	return decodeUtf8(raw, "read", target.displayPath);
@@ -414,9 +402,9 @@ async function readWholeBytes(target, signal, maxBytes, internals = {}) {
 			chunks.push(chunk);
 		}
 	} catch (error) {
-		/* v8 ignore next 2 -- a mid-stream abort needs cancellation racing an active read; pre-abort is deterministic. */
+		/* v8 ignore next -- a mid-stream abort needs cancellation racing an active read; pre-abort is deterministic. */
 		if (isAbortError(error)) throw new FsError("read aborted", "FS_ABORTED");
-		throw error;
+		throw fsErrorFromErrno("read", target.displayPath, error);
 	}
 	return Buffer.concat(chunks, bytes);
 }
@@ -446,10 +434,10 @@ async function readByteWindow(target, range, signal) {
 			bytes += chunk.length;
 		}
 	} catch (error) {
-		/* v8 ignore next 2 -- a mid-stream abort needs cancellation racing an active read; pre-abort is deterministic. */
+		/* v8 ignore next -- a mid-stream abort needs cancellation racing an active read; pre-abort is deterministic. */
 		if (isAbortError(error)) throw new FsError("read aborted", "FS_ABORTED");
-		/* v8 ignore next -- any other stream failure needs an I/O fault after a successful stat. */
-		throw error;
+		/* v8 ignore next -- needs a permission fault after a successful stat; Windows chmod cannot deny reads, POSIX covers it. */
+		throw fsErrorFromErrno("read", target.displayPath, error);
 	}
 	return Buffer.concat(chunks, bytes);
 }
@@ -479,9 +467,10 @@ async function* streamWholeText(target, signal) {
 		}
 		yield decodeUtf8Stream(decoder, void 0, "read", target.displayPath);
 	} catch (error) {
-		/* v8 ignore next 4 -- mid-stream errors need an abort/IO fault racing the loop; pre-abort is caught by throwIfAborted. */
+		/* v8 ignore next -- a mid-stream abort needs cancellation racing an active read; pre-abort is caught by throwIfAborted. */
 		if (isAbortError(error)) throw new FsError("read aborted", "FS_ABORTED");
-		throw error;
+		/* v8 ignore next -- needs a permission fault after a successful stat; Windows chmod cannot deny reads, POSIX covers it. */
+		throw fsErrorFromErrno("read", target.displayPath, error);
 	}
 }
 async function removeStagingDirOrThrow(stagingDir, originalError, removeStagingDir) {
@@ -506,6 +495,13 @@ async function throwGuardedCreateFailure(error, absolutePath, displayPath, inspe
 	}
 	if (isEEXIST(error)) throw new FsError(`cannot overwrite existing "${displayPath}" without reading it first`, "FS_NOT_OBSERVED", { cause: error });
 	throw new FsError(`cannot write "${displayPath}": ${errorMessage(error)}`, "FS_IO_ERROR", { cause: error });
+}
+/** Preserve typed failures and defects; map Node write errors for filesystem consumers. */
+function writeIoError(path, error) {
+	if (error instanceof FsError) return error;
+	if (isPermissionError(error)) return new FsError(`cannot write "${path}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });
+	if (error instanceof Error && "code" in error && typeof error.code === "string") return new FsError(`cannot write "${path}": ${error.message}`, "FS_IO_ERROR", { cause: error });
+	return error;
 }
 /**
 * Filesystems without hard links refuse `link()` — Android's emulated and
@@ -581,21 +577,30 @@ async function assertPublishedRegularFile(absolutePath, displayPath, inspectPubl
 * POSIX protects the staging directory and file with `0o700` and `0o600`. A new Windows file
 * inherits the destination directory's DACL; a replacement copies the existing target's DACL
 * onto the empty temp before writing and preserves the target descriptor at publication.
+* Node write errors become FsError; permission refusals use FS_PERMISSION_DENIED and other I/O uses FS_IO_ERROR.
 * @param absolutePath - destination; missing parent directories are created.
 * @param content - the full UTF-8 text to write.
-* @param mode - existing destination's POSIX mode to preserve, or `undefined` for a new file;
-* inert as a mode on Windows but identifies replacement security semantics.
+* @param mode - POSIX mode to apply, or undefined to retain the new-file default.
 * @param signal - cancellation checked before final publication.
 * @param internals - Test hook for pinning temp names and observing the staged file.
-* @param createIfAbsent - when provided, publish a no-replace creation; the hard link is the
-* primary primitive, a filesystem that refuses one falls back to an exclusive create replaced
-* by the staged file, and either path must land a regular file. A concurrent creator's file is
-* preserved and this write is rejected with `FS_NOT_OBSERVED` using the supplied display path.
+* @param options - `displayPath` names the target in diagnostics (defaults to `absolutePath`);
+* `createIfAbsent` publishes a no-replace creation: a filesystem that refuses the hard-link
+* primitive falls back to an exclusive create replaced by the staged file, and either path must
+* land a regular file. A concurrent creator's file is preserved and this write is rejected with
+* `FS_NOT_OBSERVED`; `existingDestination` states whether Windows must preserve destination
+* security and defaults to mode presence, while moves pass destination presence separately from
+* the source mode.
 */
-async function writeFileAtomic(absolutePath, content, mode, signal, internals = {}, createIfAbsent) {
+async function writeFileAtomic(absolutePath, content, mode, signal, internals = {}, options = {}) {
+	const displayPath = options.displayPath ?? absolutePath;
+	const existingDestination = options.existingDestination ?? mode !== void 0;
 	throwIfAborted(signal, "write");
 	const directory = dirname(absolutePath);
-	await mkdir(directory, { recursive: true });
+	try {
+		await mkdir(directory, { recursive: true });
+	} catch (error) {
+		throw writeIoError(displayPath, error);
+	}
 	throwIfAborted(signal, "write");
 	const stagingDir = join(directory, internals.tempDirName?.(absolutePath) ?? `.${basename(absolutePath)}.${process.pid}.${randomUUID()}.tmpdir`);
 	const tempPath = join(stagingDir, internals.tempName?.(absolutePath) ?? `${basename(absolutePath)}.tmp`);
@@ -617,7 +622,7 @@ async function writeFileAtomic(absolutePath, content, mode, signal, internals = 
 		await chmod(stagingDir, 448);
 		handle = await open(tempPath, "wx", 384);
 		await handle.chmod(384);
-		if (platform === "win32" && mode !== void 0) await copyFileDacl(absolutePath, tempPath);
+		if (platform === "win32" && existingDestination) await copyFileDacl(absolutePath, tempPath);
 		await handle.writeFile(content, {
 			encoding: "utf8",
 			...signal ? { signal } : {}
@@ -631,15 +636,15 @@ async function writeFileAtomic(absolutePath, content, mode, signal, internals = 
 		await handle.close();
 		handle = void 0;
 		throwIfAborted(signal, "write");
-		if (createIfAbsent !== void 0) {
+		if (options.createIfAbsent) {
 			try {
 				await linkFile(tempPath, absolutePath);
 			} catch (error) {
-				if (!isHardLinkUnavailable(error)) await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);
-				await publishExclusiveCreate(tempPath, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget, publishOverReservation);
+				if (!isHardLinkUnavailable(error)) await throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);
+				await publishExclusiveCreate(tempPath, absolutePath, displayPath, inspectPublicationTarget, publishOverReservation);
 			}
-			await assertPublishedRegularFile(absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);
-		} else if (platform === "win32" && mode !== void 0) try {
+			await assertPublishedRegularFile(absolutePath, displayPath, inspectPublicationTarget);
+		} else if (platform === "win32" && existingDestination) try {
 			await replaceFile(absolutePath, tempPath);
 		} catch (error) {
 			if (!isENOENT(error)) throw error;
@@ -651,7 +656,7 @@ async function writeFileAtomic(absolutePath, content, mode, signal, internals = 
 		} catch (_committedStagingCleanupFailure) {}
 	} catch (error) {
 		/* v8 ignore next -- abort-mid-write needs a writeFile/signal race; the non-abort (rename/open) side is tested. */
-		let failure = isAbortError(error) ? new FsError("write aborted", "FS_ABORTED") : error;
+		let failure = isAbortError(error) ? new FsError("write aborted", "FS_ABORTED") : writeIoError(displayPath, error);
 		/* v8 ignore next 8 -- reached only if writeFile/sync throws with the handle open (IO fault); close-failure is a double fault. */
 		if (handle) try {
 			await handle.close();
@@ -660,6 +665,20 @@ async function writeFileAtomic(absolutePath, content, mode, signal, internals = 
 		}
 		if (!stagingCreated) throw failure;
 		return removeStagingDirOrThrow(stagingDir, failure, removeStagingDir);
+	}
+}
+/**
+* Remove one resolved file without recursive traversal.
+* @param absolutePath - resolved file identity; a concurrently substituted directory is refused.
+* @param displayPath - caller-facing source path for diagnostics.
+* @param internals - optional source-removal fault injection; omission uses non-recursive rm.
+* @returns once removal completes; permission and other failures use filesystem error codes.
+*/
+async function removeFile(absolutePath, displayPath, internals = {}) {
+	try {
+		await (internals.removeFile ?? rm)(absolutePath);
+	} catch (error) {
+		throw new FsError(`cannot delete "${displayPath}": ${errorMessage(error)}`, isPermissionError(error) ? "FS_PERMISSION_DENIED" : "FS_IO_ERROR", { cause: error });
 	}
 }
 /**
@@ -707,7 +726,7 @@ function countOccurrences(content, needle) {
 */
 async function readForEdit(absolutePath, displayPath, signal) {
 	throwIfAborted(signal, "edit");
-	const buffer = await readFileAbortable(absolutePath, "edit", signal);
+	const buffer = await readFileAbortable(absolutePath, displayPath, "edit", signal);
 	throwIfAborted(signal, "edit");
 	if (buffer.includes(0)) throw new FsError(`cannot edit "${displayPath}": binary file`, "FS_NOT_TEXT");
 	const raw = decodeUtf8(buffer, "edit", displayPath);
@@ -853,16 +872,26 @@ var LocalFileSystem = class extends FileSystem {
 		if (!Number.isSafeInteger(resolved.diffBasisMaxBytes) || resolved.diffBasisMaxBytes <= 0 || resolved.diffBasisMaxBytes > MAX_DIFF_BASIS_BYTES) throw new Error(`fs-local: diffBasisMaxBytes must be a positive safe integer no greater than ${MAX_DIFF_BASIS_BYTES}`);
 		this.config = resolved;
 	}
-	/** Run `op` with exclusive access to `targetKey` (FIFO per key). */
-	async withLock(targetKey, op) {
-		const run = (this.locks.get(targetKey) ?? Promise.resolve()).then(op, op);
-		const tail = run.then(() => void 0, () => void 0);
-		this.locks.set(targetKey, tail);
-		try {
-			return await run;
-		} finally {
-			if (this.locks.get(targetKey) === tail) this.locks.delete(targetKey);
-		}
+	/** Run one mutation under the same lock ordering as multi-target operations. */
+	withLock(targetKey, op) {
+		return this.withLocks([targetKey], op);
+	}
+	/** Acquire distinct keys in lexical order and release inner locks before outer locks. */
+	withLocks(keys, op) {
+		const ordered = [...new Set(keys)].sort();
+		const acquire = async (index) => {
+			const key = ordered[index];
+			if (key === void 0) return op();
+			const run = (this.locks.get(key) ?? Promise.resolve()).then(() => acquire(index + 1));
+			const tail = run.then(() => void 0, () => void 0);
+			this.locks.set(key, tail);
+			try {
+				return await run;
+			} finally {
+				if (this.locks.get(key) === tail) this.locks.delete(key);
+			}
+		};
+		return acquire(0);
 	}
 	async resolve(path, opts) {
 		if (opts?.signal?.aborted) throw new FsError("resolve aborted", "FS_ABORTED");
@@ -950,14 +979,12 @@ var LocalFileSystem = class extends FileSystem {
 	}
 	async writeText(target, content, expected, signal) {
 		return this.withLock(target.targetKey, async () => {
-			const existing = await probe(target.targetKey);
-			if (existing && existing.type !== "file") throw new FsError(`cannot write "${target.displayPath}": not a regular file`, "FS_NOT_REGULAR_FILE");
-			if (expected?.kind === "replaceIfVersion") {
-				if (!existing) throw new FsError(`cannot write "${target.displayPath}": file no longer exists`, "FS_STALE_VERSION");
-				if (existing.version !== expected.version) throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");
-			} else if (expected?.kind === "createIfAbsent" && existing) throw new FsError(`cannot overwrite existing "${target.displayPath}" without reading it first`, "FS_NOT_OBSERVED");
+			const existing = await this.writeTarget(target, expected);
 			const before = existing !== null && Buffer.byteLength(content, "utf8") < this.config.diffBasisMaxBytes ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal) : null;
-			await writeFileAtomic(target.targetKey, content, existing?.mode, signal, this.internals, expected?.kind === "createIfAbsent" ? { displayPath: target.displayPath } : void 0);
+			await writeFileAtomic(target.targetKey, content, existing?.mode, signal, this.internals, {
+				displayPath: target.displayPath,
+				createIfAbsent: expected?.kind === "createIfAbsent"
+			});
 			const after = await probe(target.targetKey);
 			return {
 				operation: existing ? "update" : "create",
@@ -976,7 +1003,7 @@ var LocalFileSystem = class extends FileSystem {
 			const original = await readForEdit(target.targetKey, target.displayPath, signal);
 			const edited = applyLiteralEdit(original.content, edit.oldString, edit.newString, edit.replaceAll, target.displayPath);
 			const content = restoreLineEndings(edited.content, original.lineEndings);
-			await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals);
+			await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals, { displayPath: target.displayPath });
 			const after = await probe(target.targetKey);
 			return {
 				version: this.versionAfterWrite(after, target),
@@ -985,11 +1012,99 @@ var LocalFileSystem = class extends FileSystem {
 			};
 		});
 	}
+	async patchText(target, hunks, expected, signal) {
+		return this.withLock(target.targetKey, async () => {
+			const existing = await this.requireFile(target, expected, "patch");
+			const original = await readForEdit(target.targetKey, target.displayPath, signal);
+			const after = this.patchContent(target, original.content, hunks);
+			await writeFileAtomic(target.targetKey, restoreLineEndings(after, original.lineEndings), existing.mode, signal, this.internals, { displayPath: target.displayPath });
+			return {
+				version: this.versionAfterWrite(await probe(target.targetKey), target),
+				before: original.content,
+				after
+			};
+		});
+	}
+	async deleteFile(target, expected, signal) {
+		return this.withLock(target.targetKey, async () => {
+			await this.requireFile(target, expected, "delete");
+			const before = await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal);
+			await this.internals.inspectBeforeMutation?.(target);
+			if (signal?.aborted) throw new FsError("delete aborted", "FS_ABORTED");
+			await removeFile(target.targetKey, target.displayPath, this.internals);
+			return { before };
+		});
+	}
+	async moveFile(source, destination, options, signal) {
+		if (source.targetKey === destination.targetKey) throw new FsError(`cannot move "${source.displayPath}" to itself`, "FS_SAME_TARGET");
+		return this.withLocks([source.targetKey, destination.targetKey], async () => {
+			const sourceInfo = await this.requireFile(source, options.expectedSource, "move");
+			const existing = await this.writeTarget(destination, options.expectedDestination);
+			const original = await readForEdit(source.targetKey, source.displayPath, signal);
+			const after = options.hunks === void 0 ? original.content : this.patchContent(source, original.content, options.hunks);
+			const content = restoreLineEndings(after, original.lineEndings);
+			const before = existing && Buffer.byteLength(content, "utf8") < this.config.diffBasisMaxBytes ? await readTextForDiff(destination.targetKey, this.config.diffBasisMaxBytes, signal) : null;
+			await this.internals.inspectBeforeMutation?.(source);
+			if (signal?.aborted) throw new FsError("move aborted", "FS_ABORTED");
+			await writeFileAtomic(destination.targetKey, content, sourceInfo.mode, void 0, this.internals, {
+				displayPath: destination.displayPath,
+				createIfAbsent: options.expectedDestination?.kind === "createIfAbsent",
+				existingDestination: existing !== null
+			});
+			const outcome = {
+				operation: existing ? "update" : "create",
+				version: this.versionAfterWrite(await probe(destination.targetKey), destination),
+				before,
+				after
+			};
+			const sourceBefore = Buffer.byteLength(original.content, "utf8") < this.config.diffBasisMaxBytes ? original.content : null;
+			try {
+				await removeFile(source.targetKey, source.displayPath, this.internals);
+			} catch (error) {
+				if (!(error instanceof FsError)) throw error;
+				return {
+					sourceBefore,
+					destination: outcome,
+					sourceDeleted: false,
+					sourceFailure: {
+						code: error.code,
+						message: error.message
+					}
+				};
+			}
+			return {
+				sourceBefore,
+				destination: outcome,
+				sourceDeleted: true
+			};
+		});
+	}
+	async writeTarget(target, expected) {
+		const existing = await probe(target.targetKey);
+		if (existing && existing.type !== "file") throw new FsError(`cannot write "${target.displayPath}": not a regular file`, "FS_NOT_REGULAR_FILE");
+		if (expected?.kind === "replaceIfVersion") {
+			if (!existing) throw new FsError(`cannot write "${target.displayPath}": file no longer exists`, "FS_STALE_VERSION");
+			if (existing.version !== expected.version) throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");
+		} else if (expected?.kind === "createIfAbsent" && existing) throw new FsError(`cannot overwrite existing "${target.displayPath}" without reading it first`, "FS_NOT_OBSERVED");
+		return existing;
+	}
+	async requireFile(target, expected, verb) {
+		const existing = await probe(target.targetKey);
+		if (!existing) throw new FsError(`cannot ${verb} "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");
+		if (existing.type !== "file") throw new FsError(`cannot ${verb} "${target.displayPath}": not a regular file`, "FS_NOT_REGULAR_FILE");
+		if (expected && existing.version !== expected.version) throw new FsError(`cannot ${verb} "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");
+		return existing;
+	}
+	patchContent(target, before, hunks) {
+		const result = applyHunks(before, hunks);
+		if (!result.ok) throw new FsError(`cannot patch "${target.displayPath}": hunk at patch line ${result.failure.hunkLineNumber} (${result.failure.stage}) does not match`, "FS_PATCH_MISMATCH");
+		return result.after;
+	}
 	/* v8 ignore next 5 -- the post-write probe finding the file absent requires a
 	* concurrent unlink between rename and stat; fall back to a sentinel version. */
 	versionAfterWrite(after, target) {
 		if (after) return after.version;
-		return FsVersion(`missing:${target.targetKey}`);
+		return brandString(`missing:${target.targetKey}`);
 	}
 };
 //#endregion

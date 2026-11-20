@@ -304,18 +304,10 @@
     }
   }
 
-  // 消息流底部留白 = 输入座实际高度 + 16px 间隙。
-  // 背景：输入座由 mobile.css 钉成 fixed 贴视口底（脱离文档流），消息流
-  // 末尾需要等量留白才能滚到"最后一条消息在座上方"。
-  // 历史教训（勿回退）：
-  //  - 旧版把留白写成 scrollBody 的 padding-bottom：sticky 座的锚点会被
-  //    滚动容器自身 padding 上顶，padding 多大座浮多高；且测量用
-  //    sc.bottom - seat.top，seat.top 随 padding 移动 → 正反馈失控，
-  //    运行态座高度变化时 composer 一路漂到页面中部。
-  //  - inline 写 padding-bottom 不加 !important 会被 mobile.css 的
-  //    !important 兜底规则压掉，动态补偿形同虚设。
-  // 现方案：往 scrollBody 末尾追加独立间隔块（in-flow，高度稳定生效），
-  // 测量只取座"高度"（随内容变化，不随留白/定位变化），切断反馈回路。
+  // 消息流底部补偿 = 输入座实际高度 + 16px 间隙。输入座由 mobile.css
+  // 钉成 fixed 贴视口底；独立 style 给滚动区设置等量 margin-bottom，
+  // 直接缩短它的可见盒子。规则不写在 React 管理的节点上，避免重渲染抹掉；
+  // 测量只取座高度，不取会随补偿移动的位置，避免形成反馈回路。
   // composer 汇总统计条（"N turns · N steps | LLM …"，tagStatsBar 打的
   // .dsh-mobile-stats 且不在消息 _flowItem 里）在部分 dsh 版本里不在
   // _composerSeat 内部，而是座下方文档流中的独立节点——座改 fixed 后它
@@ -358,7 +350,25 @@
     return h;
   }
 
-  var spacerEl = null;
+  var composerClearanceStyle = null;
+  function setComposerClearance(px) {
+    if (!composerClearanceStyle || !composerClearanceStyle.isConnected) {
+      composerClearanceStyle = document.getElementById('dsh-mobile-composer-clearance');
+      if (!composerClearanceStyle) {
+        composerClearanceStyle = document.createElement('style');
+        composerClearanceStyle.id = 'dsh-mobile-composer-clearance';
+        document.head.appendChild(composerClearanceStyle);
+      }
+    }
+    var rule = px > 0
+      ? '[data-conversation-scroll], div[class*="_centerCol"] [class*="_scrollBody"] {' +
+        'margin-bottom:' + px + 'px !important;scroll-padding-bottom:16px !important;}'
+      : '';
+    if (composerClearanceStyle.textContent === rule) return false;
+    composerClearanceStyle.textContent = rule;
+    return true;
+  }
+
   // 输入座钉成 fixed 后消息流的补偿测量。
   //
   // **选择器**：优先用上游给的稳定 `data-*` 钩子（`data-composer-seat` /
@@ -378,53 +388,27 @@
   }
   function fitComposerOverlap() {
     var comp = composerSeatEl();
-    if (!comp) return;
-    var sc = scrollBodyEl(comp);
-    if (!sc) return;
-    // 新对话 hero 页的座留在文档流里（不贴底），不需要补偿；
-    // 从会话页导航过来时清掉旧间隔块/统计条钉住。
-    if (comp.querySelector('div[class*="_composerHero"]')) {
-      if (spacerEl && spacerEl.isConnected) spacerEl.remove();
+    var sc = comp && scrollBodyEl(comp);
+    // 横屏使用上游桌面布局；hero 页的座留在文档流里。两者都不需要补偿。
+    if (window.innerWidth > 700 || !comp || !sc || comp.querySelector('div[class*="_composerHero"]')) {
+      setComposerClearance(0);
+      if (comp) comp.style.removeProperty('bottom');
       if (pinnedStats) {
         pinnedStats.classList.remove('dsh-mobile-composer-stats');
         pinnedStats = null;
       }
       return;
     }
-    if (!spacerEl || !spacerEl.isConnected || spacerEl.parentElement !== sc) {
-      spacerEl = document.getElementById('dsh-mobile-composer-spacer');
-      if (!spacerEl) {
-        spacerEl = document.createElement('div');
-        spacerEl.id = 'dsh-mobile-composer-spacer';
-        spacerEl.setAttribute('aria-hidden', 'true');
-        // scrollBody 是 flex 列，禁收缩（mobile.css 有同名规则，这里双保险）
-        spacerEl.style.flex = '0 0 auto';
-      }
-      sc.appendChild(spacerEl);
-    }
-    // dsh 重渲染可能往 scrollBody 末尾插新节点（如座外统计条），
-    // 间隔块必须保持最后一个孩子，否则新内容会落到间隔块下方被裁
-    if (sc.lastElementChild !== spacerEl) sc.appendChild(spacerEl);
     var statsH = pinComposerStats(comp) || 0;
     var want = Math.max(48, Math.round(comp.getBoundingClientRect().height) + statsH + 16);
-    // 间隔块是新建元素时（React 重建过 scrollBody，或换了滚动容器）必须重新落
-    // 一次高度：只比较 want 与上一次的值会让新元素停在 height:auto(=0)，补偿静默
-    // 失效——表现就是对话末尾被固定输入座盖住。以元素自身的样式为准，不看缓存。
-    if (spacerEl.style.height !== want + 'px') {
-      // 必须在改高度**之前**取读数：改完之后 scrollHeight 已经变了。
-      var floor = Math.max(0, sc.scrollHeight - sc.clientHeight);
-      var wasAtBottom = floor - sc.scrollTop <= 2;
-      spacerEl.style.height = want + 'px';
-      sc.style.scrollPaddingBottom = want + 'px';
-      // 间隔块变高会让 scrollHeight 变大而 scrollTop 不动，viewport 就停在原来
-      // 的位置、比新的底部高出「delta」——表现是最后一条消息被固定输入座压住
-      // （#16 残留：座从 0 高长到真实高度时 delta 正好是整个座高）。dsh 自己的
-      // 贴底跟随只观察列与滚动容器，不会因为我们的节点长高而重算，所以这里必须
-      // 自己补：只有本来就停在底部才跟随，用户上翻读历史时绝不能被拽回来。
-      if (wasAtBottom) {
-        var nextFloor = Math.max(0, sc.scrollHeight - sc.clientHeight);
-        if (nextFloor - sc.scrollTop > 2) sc.scrollTop = nextFloor;
-      }
+    // fixed 座仍位于滚动区的 DOM 内，但已脱离文档流。缩短滚动区本身的盒子，
+    // 才能让它可见的底边始终停在座上方；末尾间隔块只增加可滚动距离，在部分
+    // Android WebView 的 flex/虚拟化布局里仍会让真实内容画到座下面（#16）。
+    var floor = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    var wasAtBottom = floor - sc.scrollTop <= 2;
+    if (setComposerClearance(want) && wasAtBottom) {
+      var nextFloor = Math.max(0, sc.scrollHeight - sc.clientHeight);
+      if (nextFloor - sc.scrollTop > 2) sc.scrollTop = nextFloor;
     }
   }
 
@@ -536,7 +520,10 @@
   fitComposerOverlap();
   ensurePluginAdder();
   armTooltipAutohide();
-  window.addEventListener('resize', updateSidebarDrawer);
+  window.addEventListener('resize', function () {
+    updateSidebarDrawer();
+    fitComposerOverlap();
+  });
 
   // 抽屉里点了会话/工作区行（_sessionRow 等）后自动收起抽屉。
   // dsh 桌面行为是选中不收起侧栏，手机上不收起就看不到会话内容。

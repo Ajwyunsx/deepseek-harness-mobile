@@ -893,7 +893,7 @@ describe('writeFileAtomic — temp-file safety', () => {
 
       await writeFileAtomic(file, 'ours', undefined, undefined, {
         linkFile: async () => { throw refused },
-      }, { displayPath: file })
+      }, { displayPath: file, createIfAbsent: true })
 
       expect(await readFile(file, 'utf8')).toBe('ours')
       if (posixModes) expect((await stat(file)).mode & 0o777).toBe(0o600)
@@ -908,7 +908,7 @@ describe('writeFileAtomic — temp-file safety', () => {
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       linkFile: async () => { throw refused },
       inspectTemp: async () => { await writeFile(file, 'competitor') },
-    }, { displayPath: file })).rejects.toMatchObject({
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({
       code: 'FS_NOT_OBSERVED',
       message: `cannot overwrite existing "${file}" without reading it first`,
     })
@@ -923,7 +923,7 @@ describe('writeFileAtomic — temp-file safety', () => {
     // reports success, and removing staging then dangles the published name.
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       linkFile: async (existingPath, newPath) => { await symlink(existingPath, newPath) },
-    }, { displayPath: file })).rejects.toMatchObject({
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({
       code: 'FS_NOT_REGULAR_FILE',
       message: `cannot write "${file}": published entry is not a regular file`,
     })
@@ -937,7 +937,7 @@ describe('writeFileAtomic — temp-file safety', () => {
 
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       inspectPublicationTarget: async () => { throw inspectionFailure },
-    }, { displayPath: file })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: inspectionFailure })
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: inspectionFailure })
   })
 
   it('removes this write\'s reservation when the hard-link-free rename fails', async () => {
@@ -948,7 +948,7 @@ describe('writeFileAtomic — temp-file safety', () => {
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       linkFile: async () => { throw refused },
       publishOverReservation: async () => { throw publishFailure },
-    }, { displayPath: file })).rejects.toBe(publishFailure)
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: publishFailure })
     await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
   })
@@ -967,7 +967,7 @@ describe('writeFileAtomic — temp-file safety', () => {
         await mkdir(target)
         throw publishFailure
       },
-    }, { displayPath: file })).rejects.toBe(publishFailure)
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: publishFailure })
     expect((await stat(file)).isDirectory()).toBe(true)
   })
 
@@ -976,7 +976,7 @@ describe('writeFileAtomic — temp-file safety', () => {
 
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       linkFile: async () => { throw 'no hard links' },
-    }, { displayPath: file })).rejects.toMatchObject({
+    }, { displayPath: file, createIfAbsent: true })).rejects.toMatchObject({
       code: 'FS_IO_ERROR',
       message: `cannot write "${file}": no hard links`,
     })

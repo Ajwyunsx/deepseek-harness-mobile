@@ -45,7 +45,7 @@ public final class BootstrapInstaller {
     private static final String PROOT_POOL = TERMUX_POOL + "p/proot/";
     private static final String LIBTALLOC_POOL = TERMUX_POOL + "libt/libtalloc/";
     private static final String LIBANDROID_SHMEM_POOL = TERMUX_POOL + "liba/libandroid-shmem/";
-    private static final String NODE_SERIES = "latest-v22.x";
+    private static final String NODE_SERIES = "latest-v24.x";
     private static final int CONNECT_TIMEOUT = 15000;
     private static final int READ_TIMEOUT = 60000;
 
@@ -157,6 +157,58 @@ public final class BootstrapInstaller {
         return targetVersion.equals(aligned);
     }
 
+    /**
+     * 已有容器升级 Node 24；升级会替换 /opt/node，随后由 harness 对齐流程重装 dsh。
+     *
+     * @return Node 24.9+ 已就绪时为 true；下载或解压失败时返回 false
+     */
+    public static boolean ensureNode24(Context context, File logFile) {
+        File rootfs = ProotRunner.rootfsDir(context);
+        if (NodeRuntime.isSupported(rootfs)) return true;
+        appendLog(logFile, "[node] 升级 Node.js 到 24.x（当前 harness 要求 >=24.9）");
+        BootstrapInstaller installer = new BootstrapInstaller(context, new Listener() {
+            @Override
+            public void onStage(String stage, int percent) {
+                appendLog(logFile, "[node] " + stage);
+            }
+
+            @Override
+            public void onLog(String line) {
+                appendLog(logFile, "[node] " + line);
+            }
+
+            @Override
+            public void onDone(boolean success, String error) {
+            }
+        });
+        try {
+            File downloads = new File(ProotRunner.baseDir(context), "dl");
+            if (!downloads.isDirectory() && !downloads.mkdirs()) {
+                throw new IOException("无法创建下载目录: " + downloads);
+            }
+            installer.installNode(rootfs, downloads);
+            return NodeRuntime.isSupported(rootfs);
+        } catch (Exception e) {
+            appendLog(logFile, "[node] Node.js 24 升级失败: " + e);
+            return false;
+        }
+    }
+
+    private void installNode(File rootfs, File downloads) throws IOException, InterruptedException {
+        stage("下载 Node.js 24", 45);
+        String nodeUrl = resolveNodeUrl();
+        log("Node 包: " + nodeUrl);
+        File nodeTar = new File(downloads, "node.tar.xz");
+        download(nodeUrl, nodeTar, 45, 65);
+        checkCancelled();
+        stage("解压 Node.js 24", 66);
+        deleteRecursively(new File(rootfs, "opt/node"));
+        //noinspection ResultOfMethodCallIgnored
+        new File(rootfs, "opt/node").mkdirs();
+        extractTar(nodeTar, new File(rootfs, "opt/node"), false, 1);
+        log("Node.js 24 就绪");
+    }
+
     /** 执行完整安装流程。 */
     public void run() {
         try {
@@ -247,23 +299,11 @@ public final class BootstrapInstaller {
                 log("proot 依赖库已存在，跳过");
             }
 
-            // 3. Node.js -> rootfs/opt/node
-            File nodeBin = new File(rootfs, "opt/node/bin/node");
-            if (!nodeBin.isFile()) {
-                stage("下载 Node.js", 45);
-                String nodeUrl = resolveNodeUrl();
-                log("Node 包: " + nodeUrl);
-                File nodeTar = new File(dl, "node.tar.xz");
-                download(nodeUrl, nodeTar, 45, 65);
-                checkCancelled();
-                stage("解压 Node.js", 66);
-                deleteRecursively(new File(rootfs, "opt/node"));
-                //noinspection ResultOfMethodCallIgnored
-                new File(rootfs, "opt/node").mkdirs();
-                extractTar(nodeTar, new File(rootfs, "opt/node"), false, 1);
-                log("Node.js 就绪");
+            // 3. Node.js -> rootfs/opt/node；dsh 0.2.2 起要求 Node >=24.9。
+            if (!NodeRuntime.isSupported(rootfs)) {
+                installNode(rootfs, dl);
             } else {
-                log("Node.js 已存在，跳过");
+                log("Node.js 24 已存在，跳过");
             }
 
             // 4. 容器内基础配置
@@ -673,12 +713,12 @@ public final class BootstrapInstaller {
         return pool + latest;
     }
 
-    /** 解析 Node v22 最新 linux-arm64 包地址。 */
+    /** 解析 Node v24 最新 linux-arm64 包地址。 */
     private String resolveNodeUrl() throws IOException {
         String base = prefs.getNodeMirror();
         if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
         String html = fetchText(base + "/" + NODE_SERIES + "/");
-        Matcher m = Pattern.compile("(node-v22\\.\\d+\\.\\d+)-linux-arm64\\.tar\\.xz").matcher(html);
+        Matcher m = Pattern.compile("(node-v24\\.\\d+\\.\\d+)-linux-arm64\\.tar\\.xz").matcher(html);
         String latest = null;
         while (m.find()) {
             latest = m.group(1);
